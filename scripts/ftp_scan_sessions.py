@@ -1,20 +1,46 @@
 from ftplib import FTP, error_perm
 import re
-import pandas as pd
+import json
+import csv
 
 
 # =====================================================
-# FTP SETTINGS
+# LOAD FTP CONFIGURATION
 # =====================================================
 
-FTP_HOST = "fileftp.intranet.chuv"
-FTP_USER = "user"
-FTP_PASS = "password"
-FTP_ROOT = "/filearc/DRM/EEGFENL/BackupFolder/Naomi"
+def load_ftp_config(filename="ftp.txt"):
+
+    config = {}
+
+    with open(filename, "r", encoding="utf-8") as f:
+
+        for line in f:
+
+            line = line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            key, value = line.split("=", 1)
+
+            config[key.strip()] = value.strip()
+
+    return config
+
+
+
+config = load_ftp_config()
+
+
+FTP_HOST = config["FTP_HOST"]
+FTP_USER = config["FTP_USER"]
+FTP_PASS = config["FTP_PASS"]
+FTP_ROOT = config["FTP_ROOT"]
+
 
 
 # =====================================================
-# SESSION FOLDER PATTERN
+# SESSION PATTERN
 # =====================================================
 
 pattern = re.compile(
@@ -24,145 +50,322 @@ pattern = re.compile(
 
 
 # =====================================================
-# RECURSIVE FTP SCANNER
+# GET FTP CONTENT
+# Compatible with older FTP servers
 # =====================================================
 
-def scan_ftp_folder(ftp, path):
+def get_directory_content(ftp, path):
 
-    results = []
+    files = []
+    folders = []
+
+    ftp.cwd(path)
+
+    items = ftp.nlst()
+
+
+    for item in items:
+
+        try:
+
+            current = ftp.pwd()
+
+            ftp.cwd(item)
+
+            folders.append(item)
+
+            ftp.cwd(current)
+
+
+        except error_perm:
+
+            files.append(item)
+
+            ftp.cwd(path)
+
+
+    return files, folders
+
+
+
+# =====================================================
+# BUILD COMPLETE TREE
+# =====================================================
+
+def build_tree(ftp, path):
+
+    tree = {
+
+        "files": [],
+
+        "folders": {}
+
+    }
+
 
     try:
 
-        ftp.cwd(path)
-
-        items = ftp.nlst()
-
-        folders = []
-        files = []
+        files, folders = get_directory_content(
+            ftp,
+            path
+        )
 
 
-        for item in items:
+        tree["files"] = files
 
-            full_path = f"{path.rstrip('/')}/{item}"
-
-            try:
-                # Try entering item.
-                # Success means it is a folder.
-
-                ftp.cwd(full_path)
-
-                folders.append(item)
-
-                ftp.cwd(path)
-
-
-            except error_perm:
-
-                # Otherwise it is a file
-
-                files.append(item)
-
-                ftp.cwd(path)
-
-
-
-        folder_name = path.rstrip("/").split("/")[-1]
-
-
-        # ---------------------------------------------
-        # Check if this is a session folder
-        # ---------------------------------------------
-
-        if pattern.fullmatch(folder_name):
-
-
-            mkv_files = [
-                f for f in files
-                if f.lower().endswith(".mkv")
-            ]
-
-
-            json_files = [
-                f for f in files
-                if f.lower().endswith(".json")
-            ]
-
-
-            audio_files = [
-                f for f in files
-                if (
-                    f.lower().endswith(".wav")
-                    or f.lower().endswith(".m4a")
-                )
-            ]
-
-
-            eaf_files = [
-                f for f in files
-                if f.lower().endswith(".eaf")
-            ]
-
-
-
-            results.append(
-                {
-                    "session_id": folder_name,
-
-                    # Video
-                    "mkv_files":
-                        "; ".join(mkv_files),
-
-                    "mkv_count":
-                        len(mkv_files),
-
-
-                    # Metadata
-                    "metadata_json_available":
-                        len(json_files) > 0,
-
-
-                    # Audio
-                    "audio_files":
-                        "; ".join(audio_files),
-
-                    "audio_file_count":
-                        len(audio_files),
-
-
-                    # Annotation
-                    "eaf_available":
-                        len(eaf_files) > 0,
-
-
-                    # Other folders inside session folder
-                    "other_folders":
-                        "; ".join(folders),
-                }
-            )
-
-
-
-        # ---------------------------------------------
-        # Continue scanning subfolders
-        # ---------------------------------------------
 
         for folder in folders:
 
-            print("Scanning:", f"{path}/{folder}")
+            print(
+                "Scanning:",
+                f"{path}/{folder}"
+            )
 
-            results.extend(
-                scan_ftp_folder(
-                    ftp,
+
+            tree["folders"][folder] = build_tree(
+                ftp,
                 f"{path.rstrip('/')}/{folder}"
-                )
-        )
-
+            )
 
 
     except error_perm as e:
 
         print(
-            f"Cannot access {path}: {e}"
+            "Cannot access:",
+            path,
+            e
+        )
+
+
+    return tree
+
+
+
+# =====================================================
+# COLLECT ALL FILES
+# =====================================================
+
+def collect_files(tree):
+
+    files = list(tree["files"])
+
+
+    for folder in tree["folders"].values():
+
+        files.extend(
+            collect_files(folder)
+        )
+
+
+    return files
+
+
+
+# =====================================================
+# COLLECT ALL FOLDERS
+# =====================================================
+
+def collect_folders(tree):
+
+    folders = []
+
+
+    for name, content in tree["folders"].items():
+
+        folders.append(name)
+
+        folders.extend(
+            collect_folders(content)
+        )
+
+
+    return folders
+
+
+
+# =====================================================
+# SCAN SESSIONS
+# =====================================================
+
+def scan_sessions(ftp, path):
+
+    results = []
+
+
+    tree = build_tree(
+        ftp,
+        path
+    )
+
+
+    folder_name = path.rstrip("/").split("/")[-1]
+
+
+
+    # -------------------------------------------------
+    # Is this a session folder?
+    # -------------------------------------------------
+
+    if pattern.fullmatch(folder_name):
+
+
+        files = collect_files(tree)
+
+        folders = collect_folders(tree)
+
+
+
+        mkv_files = [
+            f for f in files
+            if f.lower().endswith(".mkv")
+        ]
+
+
+        audio_files = [
+            f for f in files
+            if f.lower().endswith(
+                (".wav", ".m4a")
+            )
+        ]
+
+
+        json_files = [
+            f for f in files
+            if f.lower().endswith(".json")
+        ]
+
+
+        eaf_files = [
+            f for f in files
+            if f.lower().endswith(".eaf")
+        ]
+
+
+        txt_files = [
+            f for f in files
+            if f.lower().endswith(".txt")
+        ]
+
+
+
+        match = pattern.fullmatch(
+            folder_name
+        )
+
+
+        day, month, year, number, suffix, session_type, child_id = match.groups()
+
+
+
+        results.append(
+
+            {
+
+                "session_id":
+                    folder_name,
+
+
+                "session_date":
+                    f"{year}-{int(month):02d}-{int(day):02d}",
+
+
+                "child_id":
+                    child_id,
+
+
+                "session_type":
+                    session_type,
+
+
+                "session_number":
+                    f"{number}{suffix}",
+
+
+
+                # Complete FTP structure
+
+                "folder_structure":
+                    tree,
+
+
+                "all_files":
+                    files,
+
+
+                "all_folders":
+                    folders,
+
+
+
+                # File categories
+
+                "mkv_files":
+                    mkv_files,
+
+
+                "audio_files":
+                    audio_files,
+
+
+                "json_files":
+                    json_files,
+
+
+                "eaf_files":
+                    eaf_files,
+
+
+                "txt_files":
+                    txt_files,
+
+
+
+                # Availability
+
+                "bounding_boxes_folder_available":
+                    any(
+                        x.lower() == "bounding_boxes"
+                        for x in folders
+                    ),
+
+
+                "skeletons_folder_available":
+                    any(
+                        x.lower() == "skeletons"
+                        for x in folders
+                    ),
+
+
+                "Visualizations_folder_available":
+                    any(
+                        x.lower() == "visualizations"
+                        for x in folders
+                    ),
+
+
+                "config_reid_json_available":
+                    any(
+                        x.lower() == "config_reid.json"
+                        for x in files
+                    )
+
+            }
+
+        )
+
+
+
+    # Continue recursively
+
+    for folder in tree["folders"]:
+
+        results.extend(
+
+            scan_sessions(
+                ftp,
+                f"{path.rstrip('/')}/{folder}"
+            )
+
         )
 
 
@@ -170,17 +373,20 @@ def scan_ftp_folder(ftp, path):
 
 
 
-
 # =====================================================
-# CONNECT TO FTP
+# CONNECT FTP
 # =====================================================
 
-print("Connecting to FTP...")
+print("Connecting FTP...")
 
-ftp = FTP(FTP_HOST)
 
-# Many FTP servers use latin-1 encoding for filenames
+ftp = FTP(
+    FTP_HOST
+)
+
+
 ftp.encoding = "latin-1"
+
 
 ftp.login(
     FTP_USER,
@@ -188,214 +394,144 @@ ftp.login(
 )
 
 
-print("Connected.")
+print(
+    "Connected"
+)
 
-print("Scanning folders...")
 
-sessions = scan_ftp_folder(
+print(
+    "FTP location:",
+    ftp.pwd()
+)
+
+
+
+# Test root
+
+ftp.cwd(
+    FTP_ROOT
+)
+
+
+print(
+    "Scanning root:",
+    ftp.pwd()
+)
+
+
+
+# =====================================================
+# RUN SCAN
+# =====================================================
+
+sessions = scan_sessions(
     ftp,
     FTP_ROOT
 )
 
 
+
 ftp.quit()
 
 
+
 print(
-    f"Found {len(sessions)} session folders"
+    f"Found {len(sessions)} sessions"
 )
 
 
 
 # =====================================================
-# CREATE CSV
+# SAVE JSON
 # =====================================================
 
-rows = []
+with open(
+    "sessions_inventory.json",
+    "w",
+    encoding="utf-8"
+) as f:
 
 
-for session in sessions:
-
-
-    session_id = session["session_id"]
-
-
-    match = pattern.fullmatch(session_id)
-
-
-    if not match:
-        continue
-
-
-
-    day, month, year, number, suffix, session_type, child_id = match.groups()
-
-
-
-    rows.append(
-        {
-
-            # -----------------------------
-            # Original columns
-            # -----------------------------
-
-            "session_id":
-                session_id,
-
-
-            "session_date":
-                f"{year}-{int(month):02d}-{int(day):02d}",
-
-
-            "child_id":
-                child_id,
-
-
-            "session_type":
-                session_type,
-
-
-            "session_number":
-                f"{number}{suffix}",
-
-
-
-            "audio_available":
-                "",
-
-
-            "time_offset_ms":
-                "",
-
-
-            "coded_bei_xuan":
-                "",
-
-
-            "coded_emily":
-                "",
-
-
-            "combined_file":
-                "",
-
-
-            "psifx_processed":
-                "",
-
-
-
-            # -----------------------------
-            # FTP inventory columns
-            # -----------------------------
-
-            "mkv_files":
-                session["mkv_files"],
-
-
-            "mkv_count":
-                session["mkv_count"],
-
-
-            "metadata_json_available":
-                session["metadata_json_available"],
-
-
-            "audio_files":
-                session["audio_files"],
-
-
-            "audio_file_count":
-                session["audio_file_count"],
-
-
-            "eaf_available":
-                session["eaf_available"],
-
-
-            "other_folders":
-                session["other_folders"],
-
-        }
+    json.dump(
+        sessions,
+        f,
+        indent=4,
+        ensure_ascii=False
     )
 
 
 
+print(
+    "Saved sessions_inventory.json"
+)
+
+
+
 # =====================================================
-# SAVE CSV
+# SAVE CSV SUMMARY
 # =====================================================
 
-df = pd.DataFrame(rows)
+columns = [
 
+    "session_id",
+    "session_date",
+    "child_id",
+    "session_type",
+    "session_number",
 
+    "mkv_files",
+    "audio_files",
+    "eaf_files",
+    "txt_files",
 
-df = df[
-    [
+    "bounding_boxes_folder_available",
+    "skeletons_folder_available",
+    "Visualizations_folder_available",
+    "config_reid_json_available"
 
-        "session_id",
-
-        "session_date",
-
-        "child_id",
-
-        "session_type",
-
-        "session_number",
-
-
-        "audio_available",
-
-        "time_offset_ms",
-
-        "coded_bei_xuan",
-
-        "coded_emily",
-
-        "combined_file",
-
-        "psifx_processed",
-
-
-        "mkv_files",
-
-        "mkv_count",
-
-
-        "metadata_json_available",
-
-
-        "audio_files",
-
-        "audio_file_count",
-
-
-        "eaf_available",
-
-
-        "other_folders",
-
-    ]
 ]
 
 
 
-output_file = "sessions_inventory.csv"
+with open(
+    "sessions_inventory.csv",
+    "w",
+    newline="",
+    encoding="utf-8"
+) as f:
 
 
-df.to_csv(
-    output_file,
-    index=False
-)
+    writer = csv.DictWriter(
+        f,
+        fieldnames=columns
+    )
+
+
+    writer.writeheader()
+
+
+    for row in sessions:
+
+        writer.writerow(
+
+            {
+
+                key:
+                    "; ".join(row[key])
+                    if isinstance(row[key], list)
+                    else row[key]
+
+                for key in columns
+
+            }
+
+        )
 
 
 
-print("\nFinished")
-print("----------------------------")
-print(f"CSV created : {output_file}")
-print(f"Sessions    : {len(df)}")
-
-
-print("\nPreview:")
 print(
-    df.head(10).to_string(index=False)
+    "Saved sessions_inventory.csv"
 )
+
+
+print("Finished")
