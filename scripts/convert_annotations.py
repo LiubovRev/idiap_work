@@ -5,11 +5,11 @@ convert_annotations.py
 
 Converts existing clinical annotation files (tab-delimited text exports
 from ELAN, e.g. `10-1-2024__6_INDIVIDUAL__15__WAKEE_17_10_25_BL.txt`)
-into a unified JSON/CSV format compatible with the schema
+into a unified JSON/CSV format compatible with the Phase 0 schema
 (Children / Sessions / Tracking+features).
 
 ------------------------------------------------------------------
-INPUT FORMAT 
+INPUT FORMAT (verified against a real file)
 ------------------------------------------------------------------
 Each line is one annotation, 9 tab-separated columns, no header:
 
@@ -25,7 +25,7 @@ The "tier" name encodes the track:
     - "t<n>_<CODE>"   -> therapist/adult track #<n>, annotation tag <CODE>
     (other prefixes are kept as-is with track_type="other")
 
-Real tag examples:
+Real tag examples (CP, CAO — confirmed against Odobez's meeting/PDF notes):
     c15_CP  -> Child Position:  CST (standing), CSI (sitting), CHO (leaning over)...
     c15_CAO -> Child Attending to Objects: AO
     c15_JA  -> Joint Attention: TC ...
@@ -45,7 +45,7 @@ OUTPUT
 2) <out_dir>/annotations_master.csv   — all annotations, all sessions, one row per annotation
 
 If you pass --sessions-csv (a CSV export of the "Sessions" sheet from
-Phase 0 — the same one built in CHUV_Data_Tables.xlsx), the
+Phase 0 — the same one built in OmniHead_CHUV_Data_Tables.xlsx), the
 script looks up time_offset_ms by session_id and adds audio-aligned
 start/end times to every annotation (video_ms - offset_ms), flagging
 those that precede the start of the audio.
@@ -53,7 +53,7 @@ those that precede the start of the audio.
 ------------------------------------------------------------------
 USAGE
 ------------------------------------------------------------------
-    python3 convert_annotations.py \\
+    python convert_annotations.py \\
         --input-dir /path/to/annotation_exports \\
         --out-dir   /path/to/output \\
         [--sessions-csv /path/to/sessions.csv] \\
@@ -203,6 +203,14 @@ def parse_annotation_file(path: Path) -> list[dict]:
 def load_time_offsets(sessions_csv: Optional[Path]) -> dict:
     if not sessions_csv:
         return {}
+    if not sessions_csv.exists():
+        print(
+            f"[!] --sessions-csv path not found: {sessions_csv}\n"
+            f"    (resolved to: {sessions_csv.resolve()})\n"
+            f"    Check the path, or drop --sessions-csv to run without audio alignment.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     offsets = {}
     with sessions_csv.open(encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -218,23 +226,77 @@ def load_time_offsets(sessions_csv: Optional[Path]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. (Optional) tier_code -> human-readable label map 
+# 5. (Optional) tier_code -> human-readable label map (extendable by the team)
 # ---------------------------------------------------------------------------
 
+# Tier-level labels (what the tier itself represents).
 DEFAULT_TIER_MAP = {
     "ST": "Session time (boundary)",
     "CP": "Child position",
     "CAO": "Child attending to objects",
-    "CAT": "Child attending to task/therapist",
-    "CI": "Child interaction",
-    "CV": "Child vocalization",
+    "CAT": "Child attention to therapist",
     "CG": "Child gaze",
-    "CSP": "Child session phase",
-    "JA": "Joint attention",
+    "CSP": "Child session pattern",
+    "CTCA": "Common action during shared engagement (child-tier, within CSP:TC/PL/PRC)",
+    "TSP": "Therapist session pattern",
+    "JA": "Joint eye contact",
     "TP": "Therapist position",
-    "TI": "Therapist interaction",
+    "CV": "Child vocalization",
     "TV": "Therapist vocalization",
-    "TSP": "Therapist session phase",
+    # "CI" appears in at least one real annotation file but is not documented
+    # in the official ELAN schema table we have — meaning unconfirmed.
+    "CI": "UNCONFIRMED — appears in real data, not in the documented schema",
+}
+
+# Per-VALUE operational definitions, keyed by (tier_code, value). Looked up
+# in addition to the tier-level label above when both are available.
+# Confirmed against the official "ELAN annotation schema for individual
+# sessions" table (CHUV / Bei-Xuan Lin).
+TIER_VALUE_MAP = {
+    ("ST", "ST"): "Defines session start/end range for analysis",
+    ("CP", "CST"): "Standing; two feet on ground",
+    ("CP", "CHO"): "Hovering/leaning over table; one foot on chair/one on ground",
+    ("CP", "CSI"): "Sitting",
+    ("CP", "CGO"): "Child gone (left room / in box / not visible)",
+    ("CP", "CLF"): "On floor (lying down)",
+    ("CP", "CRE"): "Reaching: partial rise from seated/half-standing to grasp objects",
+    ("CP", "CCR"): "Crouch: knees bent, upper body forward",
+    ("CAO", "AO"): "Attending to session-related objects (e.g. clay, Legos, paintings)",
+    ("CAO", "ANO"): "Attending to non-session-related objects (e.g. sink, shoes, jacket)",
+    ("CAO", "AU"): "Attending to undetermined objects",
+    ("CAT", "AT"): "Attending to therapist",
+    ("CG", "GO"): "Gaze at session-related objects",
+    ("CG", "GT"): "Gaze at therapist",
+    ("CG", "GNO"): "Gaze at non-session-related objects",
+    ("CG", "GU"): "Gaze undetermined",
+    ("CSP", "CP"): "Child creating/playing on their own",
+    ("CSP", "COB"): "Child observing therapist's creative actions without participation",
+    ("CSP", "TC"): "Child and therapist building/creating/discussing together",
+    ("CSP", "PL"): "Child and therapist playing together",
+    ("CSP", "PRC"): "Preparing/cleaning up by either child or therapist",
+    ("CTCA", "OBJ_EXCHANGE"): "Transfer of materials between child and therapist",
+    ("CTCA", "ARTMAKING"): "Object-based creation or sensory exploration (drawing, sculpting, baking, arranging materials...)",
+    ("CTCA", "SYMBOLIC_PLAY"): "Pretending/symbolic use of objects representing roles/events (role-play, enacting stories...)",
+    ("CTCA", "COORDINATED_PLAY"): "Rule-governed or rhythmic physical interaction requiring mutual timing/turn structure (drumming, ball catch, clapping games...)",
+    ("CTCA", "CONVERSATION"): "Reciprocal verbal interaction when not dominated by active play or artmaking",
+    ("CTCA", "CLEAN_UP_ACTIVITY"): "Organizing/tidying/closing an activity",
+    ("TSP", "T"): "Therapist creating on their own",
+    ("TSP", "TOB"): "Therapist observing/supervising child without direct material engagement or verbal collaboration",
+    ("TSP", "TC"): "Child and therapist building/creating/discussing together",
+    ("TSP", "PL"): "Child and therapist playing together",
+    ("TSP", "PRC"): "Preparing/cleaning up by either child or therapist",
+    ("JA", "TC"): "Joint eye contact present between therapist and child",
+    ("TP", "TST"): "Standing; two feet on ground",
+    ("TP", "THO"): "Hovering/leaning over table; one foot on chair/one on ground",
+    ("TP", "TSI"): "Sitting",
+    ("TP", "TGO"): "Therapist gone (left room / not visible)",
+    ("TP", "TLF"): "On floor (lying down)",
+    ("TP", "TRE"): "Reaching: partial rise from seated/half-standing to grasp objects",
+    ("TP", "TCR"): "Crouch: knees bent, upper body forward",
+    ("CV", "CS"): "Child speaking",
+    ("CV", "CNS"): "Child making non-speech sounds",
+    ("TV", "TS"): "Therapist speaking",
+    ("TV", "TNS"): "Therapist making non-speech sounds",
 }
 
 
@@ -269,6 +331,7 @@ def convert_file(path: Path, tier_map: dict, offsets: dict) -> dict:
             "tier_code": tinfo["tier_code"],
             "tier_label": tier_map.get(tinfo["tier_code"], ""),
             "value": seg["value"],
+            "value_label": TIER_VALUE_MAP.get((tinfo["tier_code"], seg["value"]), ""),
             "start_ms_video": seg["start_ms"],
             "end_ms_video": seg["end_ms"],
             "duration_ms": seg["duration_ms"],
