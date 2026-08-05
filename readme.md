@@ -1,8 +1,5 @@
 # CHUV Art Therapy Gaze Analysis: Complete Documentation
 
-**Project**: Idiap × CHUV — Automated Gaze & Interaction Analysis  
-**Duration**: 4 months (15/07 – 15/11)  
-**Deliverable**: Research paper validating automated tracking against manual annotations  
 **Status**: T3/T4 Phase (Structure & Tracking Pipeline)
 
 ---
