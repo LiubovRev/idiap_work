@@ -67,6 +67,7 @@ ROOT_Directory_Processed/
         └── validation/                     # Quality control & visualization
             ├── validation_rendered.mp4     # Video with overlaid masks, track IDs & ELAN tiers
 ---
+```
 # Data Dictionary & Schema Reference
 
 Complete reference for all data structures used in the CHUV project pipeline.
