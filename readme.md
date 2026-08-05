@@ -106,7 +106,7 @@ Sessions with Skeletons,5,Pose keypoints available
 #### Sheet 2: Sessions (all)
 
 **One row per recorded therapy session** (306 total rows).
-
+```
 | Column | Type | Example | Definition | Notes |
 |--------|------|---------|-----------|-------|
 | `session_id` | string | "15_6" | Unique session identifier | Format: `{child_id}_{session_number}` (not date-based for stability) |
@@ -161,7 +161,7 @@ notes: "Annotation complete, ready for SAM3 validation"
 #### Sheet 4: Children
 
 **One row per unique child participant** (25 total rows).
-
+```
 | Column | Type | Example | Definition | Notes |
 |--------|------|---------|-----------|-------|
 | `child_id` | integer | 15 | Unique child identifier | Primary key |
@@ -175,7 +175,7 @@ notes: "Annotation complete, ready for SAM3 validation"
 | `nb_psifx_processed` | integer | 0 | Sessions through pipeline | Automated mask/skeleton extraction |
 | `clinical_notes` | string | "ADHD diagnosis" | Clinical context | General condition; no specific details |
 | `dropout_status` | string | "Active" or "Discontinued" | Participation status | Whether child is still attending |
-
+```
 **Example row**:
 ```
 child_id: 15
