@@ -1,131 +1,186 @@
-# CHUV-ADHDArtTherapy Data Architecture & Processing Pipeline
+# CHUV Art Therapy Gaze Analysis: Complete Documentation
 
-## 1. Directory Structure
+**Project**: Idiap × CHUV — Automated Gaze & Interaction Analysis  
+**Duration**: 4 months (15/07 – 15/11)  
+**Deliverable**: Research paper validating automated tracking against manual annotations  
+**Status**: T3/T4 Phase (Structure & Tracking Pipeline)
 
-The repository/server storage is divided into raw immutable data (Naomi Archive) and derived features/outputs.
+---
 
-```text
+## Table of Contents
+
+1. [Project Overview](#project-overview)
+2. [Directory Architecture](#directory-architecture)
+3. [Data Dictionary & Schemas](#data-dictionary--schemas)
+4. [ELAN Annotation Codes](#elan-annotation-codes)
+5. [T4 Tracking Pipeline Guide](#t4-tracking-pipeline-guide)
+6. [Processing Checkpoints](#processing-checkpoints)
+7. [Quick Reference](#quick-reference)
+
+---
+
+## Project Overview
+
+### Clinical Context
+
+- **Population**: Children with neurodevelopmental disorders (ADHD, ASD, learning disabilities); ages 7–12
+- **Intervention**: Weekly art therapy sessions (30–45 minutes each)
+- **Current State**: 306 sessions recorded (212 individual + 94 group); 30 manually coded (9.8% progress)
+- **Key Finding**: Children show significant **gaze shift from object-focused to therapist-focused** between early and late sessions — a marker of increasing social engagement
+
+### Goal
+
+Automate gaze and interaction analysis to:
+- Track behavioral changes over therapy progression
+- Validate therapy outcomes with objective metrics
+- Replace manual frame-by-frame coding (currently 10% complete, very time-intensive)
+
+### Scope & Deliverables
+
+| Aspect | Details |
+|--------|---------|
+| **Attention behaviors** | Gaze, blink/saccade, eye contact, joint attention |
+| **Linguistic conditioning** | Whisper ASR transcripts (stretch goal) |
+| **Duration** | 4 months (15/07 – 15/11) |
+| **Primary deliverable** | Research paper with automated validation |
+
+---
+
+## Directory Architecture
+
+### Raw Data: `ROOT_Directory_Raw/`
+
+**Immutable source** — read-only Naomi archive with original session recordings.
+
+```
 ROOT_Directory_Raw/
 └── SESSIONS/
     └── <day>-<month>-<year>_#<session_number>_<TYPE>_[<child_ids>]/
-        ├── raw_video.mkv                  # Main session recording (e.g., 10-1-2024_#6_INDIVIDUAL_[15].mkv)
-        ├── audio_track.wav                # Synchronized audio (iPhone capture + manual offset sync)
+        ├── raw_video.mkv                  # Main recording (typically 30–45 min)
+        ├── audio_track.wav                # Separate audio (iPhone capture)
         ├── depth_data.bin                 # Azure Kinect depth stream (optional)
-        └── <session_id>_BL.txt            # Exported ELAN manual annotation (tab-delimited tiers)
+        └── <session_id>_BL.txt            # ELAN .txt export (tab-delimited annotations)
+```
+
+#### Naming Convention
+
+Format: `<day>-<month>-<year>_#<session_number>_<TYPE>_[<child_ids>]`
+
+| Example | Meaning |
+|---------|---------|
+| `10-1-2024_#6_INDIVIDUAL_[15]` | Child 15, Jan 10, 2024, individual session #6 |
+| `11-1-2024_#6_GROUP_[1-3]` | Children 1 & 3, Jan 11, 2024, group session #6 |
+| `12-12-2023_#5_GROUP_[12-13-19]` | Children 12, 13, 19, Dec 12, 2023, group session #5 |
+
+**Key Quirks** (handled by parsing scripts):
+- Session numbers can repeat per child on different dates → use `session_id` (child_id + session_number) as true unique key
+- A few sessions have "correct"/"error" suffixes or 4-digit anomalies (#1001, #1002, #1003)
+
 ---
+
+### Processed Outputs: `ROOT_Directory_Processed/`
+
+**Derived data** — all extracted features, masks, annotations, and validation outputs.
+
+```
 ROOT_Directory_Processed/
 │
 ├── GENERAL_FILES/                         # Centralized metadata & tables
-│   ├── CHUV_data_tables.xlsx               # Primary Excel workbook
-│   │   ├── Overview                        # Summary: 306 sessions, 25 children, coding progress
-│   │   ├── Sessions (all)                  # One row per session; file availability flags
-│   │   ├── Sessions (annotated)            # Subset with manual ELAN coding (36 rows, deprecated)
-│   │   ├── Children                        # One row per child; participation metadata
-│   │   └── Tracking + Features             # Person-level tracking (child vs. therapist per session)
+│   ├── CHUV_data_tables.xlsx               # Primary Excel workbook (5 sheets)
+│   │   ├── Overview                        # Summary statistics
+│   │   ├── Sessions (all)                  # 306 rows: one per session + flags
+│   │   ├── Sessions (annotated)            # DEPRECATED: 36-row snapshot
+│   │   ├── Children                        # 25 rows: one per child
+│   │   └── Tracking + Features             # Person-level metadata
 │   │
-│   ├── sessions_inventory.json             # Authoritative machine-generated file listing
-│   │   └── Fields: session_id, session_date, child_id, session_type, all_files, mkv_files, audio_files, eaf_files
-│   │
-│   ├── children_table.csv                  # Quick reference: child_id, age, gender, clinical_diagnosis
-│   ├── sessions_list.csv                   # Session registry with audio_offset_ms for alignment
-│   └── tracking_validation.json            # QA status per session (valid | needs_correction | not_processed)
+│   ├── sessions_inventory.json             # Authoritative file listing (machine-generated)
+│   ├── children_table.csv                  # Quick reference: child_id, age, diagnosis
+│   ├── sessions_list.csv                   # Session registry with time offsets
+│   └── tracking_validation.json            # QA status tracker (valid|needs_correction|in_progress)
 │
 └── SESSIONS/
-    └── <session_id>/                       # Normalized ID, e.g., 15_6 (child 15, session #6)
+    └── <session_id>/                       # Normalized ID (e.g., 15_6)
         │
-        ├── tracking/                       # Computer vision outputs: masks, bounding boxes, tracking IDs
-        │   ├── masks/                      # Binary or RLE-encoded masks from SAM3 (per-person segmentation)
-        │   │   ├── 15_6_c_mask_frames.npz  # Child mask across all frames
-        │   │   └── 15_6_t_mask_frames.npz  # Therapist mask across all frames
+        ├── tracking/                       # CV masks & bounding boxes
+        │   ├── masks/
+        │   │   ├── <session_id>_c_mask_frames.npz     # Child mask (NumPy)
+        │   │   └── <session_id>_t_mask_frames.npz     # Therapist mask (NumPy)
         │   │
-        │   ├── bboxes/                     # Bounding boxes derived from masks
-        │   │   └── 15_6_bboxes.json        # {track_id: [x_min, y_min, x_max, y_max, frame_no]}
+        │   ├── bboxes/
+        │   │   └── <session_id>_bboxes.json           # Per-track bboxes per frame
         │   │
-        │   └── tracks.json                 # Tracking metadata
-        │       ├── track_id: "15_6_c" | "15_6_t"
-        │       ├── role: "child" | "therapist"
-        │       ├── mask_source: "SAM3"
-        │       ├── pose_source: "MediaPipe" | "Sapiens"
-        │       └── gaze_face_source: "OpenFace2.0" | "Pierre_GazeModel"
+        │   └── tracks.json                             # Tracking metadata
         │
-        ├── features/                       # Extracted body pose & gaze direction
-        │   ├── heads/                      # Face/head outputs from OpenFace 2.0 & gaze models
-        │   │   ├── 15_6_c_head_pose.json   # Head rotation (yaw, pitch, roll) per frame
-        │   │   ├── 15_6_c_gaze_3d.json     # Gaze direction (3D normalized vector) per frame
-        │   │   ├── 15_6_t_head_pose.json   # Therapist head pose
-        │   │   └── 15_6_t_gaze_3d.json     # Therapist gaze direction
+        ├── features/                       # Pose & gaze
+        │   ├── heads/
+        │   │   ├── <track_id>_head_pose.json   # Yaw, pitch, roll per frame
+        │   │   └── <track_id>_gaze_3d.json     # 3D gaze vector per frame
         │   │
-        │   └── skeleton/                   # Keypoint pose data
-        │       ├── 15_6_c_skeleton.json    # Child skeleton keypoints (e.g., MediaPipe 33-point model)
-        │       └── 15_6_t_skeleton.json    # Therapist skeleton keypoints
+        │   └── skeleton/
+        │       ├── <track_id>_skeleton.json    # Keypoint coordinates (MediaPipe)
+        │       └── ...
         │
-        ├── annotations/                    # Manual ELAN coding (parsed into standard formats)
-        │   ├── 15_6_annotations.json       # Unified JSON: {tier_name: [{start_sec, end_sec, code, duration}]}
-        │   ├── 15_6_annotations.csv        # Frame-by-frame tab-delimited (for alignment with video)
-        │   └── 15_6_annotations_schema.txt # Human-readable tier legend (for quick reference)
+        ├── annotations/                    # ELAN parsed formats
+        │   ├── <session_id>_annotations.json       # Unified tier structure
+        │   ├── <session_id>_annotations.csv        # Frame-by-frame alignment
+        │   └── <session_id>_annotations_schema.txt # Tier legend
         │
-        └── validation/                     # Quality control & visualization
-            ├── validation_rendered.mp4     # Video with overlaid masks, track IDs & ELAN tiers
----
+        └── validation/                     # QA & visualization
+            ├── validation_rendered.mp4     # Overlay video
+            ├── validation_report.json      # QA metrics
+            └── validation_status.txt       # Status flag
 ```
-# Data Dictionary & Schema Reference
 
-Complete reference for all data structures used in the CHUV project pipeline.
+**Track ID Format**: `<session_id>_<role_letter>`
+- `15_6_c` = Child in session 15_6
+- `15_6_t` = Therapist in session 15_6
 
 ---
 
-## Section A: Metadata Tables
+## Data Dictionary & Schemas
 
-### CHUV_data_tables.xlsx
+### A. Excel Metadata Tables (CHUV_data_tables.xlsx)
 
 #### Sheet 1: Overview
 
-High-level summary of the full dataset.
+High-level summary of the dataset.
 
-| Column | Type | Example | Definition |
-|--------|------|---------|-----------|
-| `metric` | string | "Total Sessions" | Metric name |
-| `value` | integer or float | 306 | Metric value |
-| `description` | string | "All recorded therapy sessions" | What this metric counts |
-
-**Example rows**:
 ```
-metric,value,description
-Total Sessions,306,All recorded therapy sessions
-Individual Sessions,212,One child per session
-Group Sessions,94,Multiple children per session
-Unique Children,25,Participants (ages 7–12)
-Sessions with Audio,292,Has synchronized audio track
-Sessions Manually Coded,30,ELAN annotations completed (9.8% progress)
-Sessions with Bounding Boxes,5,SAM3 masks extracted
-Sessions with Skeletons,5,Pose keypoints available
+metric | value | description
+-------|-------|------------
+Total Sessions | 306 | All recorded therapy sessions
+Individual Sessions | 212 | One child per session
+Group Sessions | 94 | Multiple children per session
+Unique Children | 25 | Participants (ages 7–12)
+Sessions with Audio | 292 | Synchronized audio track
+Sessions Manually Coded | 30 | ELAN annotations (9.8% progress)
+Sessions with Bounding Boxes | 5 | SAM3 masks extracted
+Sessions with Skeletons | 5 | Pose keypoints available
 ```
-
----
 
 #### Sheet 2: Sessions (all)
 
-**One row per recorded therapy session** (306 total rows).
-```
-| Column | Type | Example | Definition | Notes |
-|--------|------|---------|-----------|-------|
-| `session_id` | string | "15_6" | Unique session identifier | Format: `{child_id}_{session_number}` (not date-based for stability) |
-| `session_date` | date | 2024-01-10 | Date of recording | ISO 8601 format |
-| `child_id` | string/int | 15 | Individual child identifier | For group sessions, comma-separated: "1,3" |
-| `session_type` | string | "INDIVIDUAL" or "GROUP" | Session classification | Coding schema differs by type |
-| `session_number` | integer | 6 | Sequential session number (per child) | Not always unique per child; use session_id for unique key |
-| `naomi_folder_name` | string | "10-1-2024_#6_INDIVIDUAL_[15]" | Raw folder name in Naomi archive | Parsed into above columns |
-| `audio_available` | boolean | True | Audio track exists | iPhone-captured audio + time sync |
-| `time_offset_ms` | integer | 1250 | Audio→Video time offset | Video starts this many ms before audio; for alignment |
-| `coded_bei_xuan` | boolean | True | Manually annotated by Bei-Xuan | Primary annotator |
-| `coded_emily` | boolean | False | Manually annotated by Emily | Secondary/validation annotator |
-| `eaf_available` | boolean | True | ELAN file exists | `.eaf` or `.txt` export available |
-| `mkv_files_count` | integer | 1 | Number of video files | Usually 1; multiple if recording split |
-| `depth_available` | boolean | False | Azure Kinect depth stream | Optional; not all sessions have depth |
-| `psifx_processed` | boolean | False | Run through pipeline | Mask/skeleton/gaze extraction complete |
-| `bounding_boxes_folder_available` | boolean | True | SAM3 bounding box outputs exist | Derived from masks |
-| `skeletons_folder_available` | boolean | True | Pose keypoint files exist | MediaPipe or Sapiens output |
-| `notes` | string | "Audio offset confirmed" | Any special conditions | Free-form field for flagging issues |
+**One row per recorded therapy session** (306 total).
+
+| Column | Type | Example | Definition |
+|--------|------|---------|-----------|
+| `session_id` | string | "15_6" | Unique ID: `{child_id}_{session_number}` |
+| `session_date` | date | 2024-01-10 | Recording date (ISO 8601) |
+| `child_id` | int/string | 15 or "1,3" | Child ID(s) (comma-sep for groups) |
+| `session_type` | string | "INDIVIDUAL" | "INDIVIDUAL" or "GROUP" |
+| `session_number` | int | 6 | Sequential per child (may repeat across children/dates) |
+| `naomi_folder_name` | string | "10-1-2024_#6_INDIVIDUAL_[15]" | Raw folder name in archive |
+| `audio_available` | bool | True | Has audio track |
+| `time_offset_ms` | int | 1250 | Audio→Video sync offset (video starts this many ms before audio) |
+| `coded_bei_xuan` | bool | True | Manually annotated (Bei-Xuan) |
+| `coded_emily` | bool | False | Manually annotated (Emily, secondary) |
+| `eaf_available` | bool | True | ELAN file exists |
+| `mkv_files_count` | int | 1 | Number of video files |
+| `depth_available` | bool | False | Has Azure Kinect depth |
+| `psifx_processed` | bool | False | Mask/skeleton/gaze extraction complete |
+| `bounding_boxes_folder_available` | bool | True | SAM3 bboxes exist |
+| `skeletons_folder_available` | bool | True | Pose keypoints exist |
+| `notes` | string | "Annotation complete, ready for SAM3" | Free-form QA notes |
 
 **Example row**:
 ```
@@ -140,7 +195,6 @@ time_offset_ms: 1250
 coded_bei_xuan: True
 coded_emily: False
 eaf_available: True
-mkv_files_count: 1
 depth_available: False
 psifx_processed: False
 bounding_boxes_folder_available: True
@@ -148,34 +202,29 @@ skeletons_folder_available: True
 notes: "Annotation complete, ready for SAM3 validation"
 ```
 
----
-
 #### Sheet 3: Sessions (annotated) — DEPRECATED
 
-**Snapshot of only the 36 manually-coded sessions** (from early project phases).
-
-→ **Status**: Outdated. Use **Sheet 2: Sessions (all)** instead, filtering on `coded_bei_xuan=True`.
-
----
+Snapshot of 36 manually-coded sessions from early phases. **Status**: Outdated.  
+→ Use **Sheet 2** instead, filtering on `coded_bei_xuan=True`.
 
 #### Sheet 4: Children
 
-**One row per unique child participant** (25 total rows).
-```
-| Column | Type | Example | Definition | Notes |
-|--------|------|---------|-----------|-------|
-| `child_id` | integer | 15 | Unique child identifier | Primary key |
-| `age_range` | string | "7–12" | Reported age bracket | All participants in this range; no exact ages for privacy |
-| `session_type_primary` | string | "INDIVIDUAL" | Predominant session type | Most sessions are individual or group |
-| `nb_individual_sessions` | integer | 3 | Count of individual sessions | Child attended alone |
-| `nb_group_sessions` | integer | 1 | Count of group sessions | Child attended with peers |
-| `total_sessions` | integer | 4 | Total participated sessions | Sum of individual + group |
-| `nb_with_audio` | integer | 4 | Sessions with audio track | Fully synchronized |
-| `nb_coded_bei_xuan` | integer | 3 | Sessions manually annotated | ELAN coding complete |
-| `nb_psifx_processed` | integer | 0 | Sessions through pipeline | Automated mask/skeleton extraction |
-| `clinical_notes` | string | "ADHD diagnosis" | Clinical context | General condition; no specific details |
-| `dropout_status` | string | "Active" or "Discontinued" | Participation status | Whether child is still attending |
-```
+**One row per unique child participant** (25 total).
+
+| Column | Type | Example | Definition |
+|--------|------|---------|-----------|
+| `child_id` | int | 15 | Unique child ID |
+| `age_range` | string | "7–12" | Age bracket (no exact ages for privacy) |
+| `session_type_primary` | string | "INDIVIDUAL" | Predominant session type |
+| `nb_individual_sessions` | int | 3 | Count of individual sessions |
+| `nb_group_sessions` | int | 1 | Count of group sessions |
+| `total_sessions` | int | 4 | Total (individual + group) |
+| `nb_with_audio` | int | 4 | Sessions with audio |
+| `nb_coded_bei_xuan` | int | 3 | Sessions manually annotated |
+| `nb_psifx_processed` | int | 0 | Sessions through pipeline |
+| `clinical_notes` | string | "ADHD diagnosis" | General clinical context |
+| `dropout_status` | string | "Active" | "Active" or "Discontinued" |
+
 **Example row**:
 ```
 child_id: 15
@@ -187,32 +236,30 @@ total_sessions: 4
 nb_with_audio: 4
 nb_coded_bei_xuan: 3
 nb_psifx_processed: 0
-clinical_notes: "ADHD diagnosis"
-dropout_status: "Active"
+clinical_notes: ADHD diagnosis
+dropout_status: Active
 ```
-
----
 
 #### Sheet 5: Tracking + Features
 
 **One row per person per session** (tracking entity level).
 
-Specifies which computer-vision models processed each person (child or therapist) in each session.
+Specifies which CV models processed each person (child or therapist).
 
-| Column | Type | Example | Definition | Notes |
-|--------|------|---------|-----------|-------|
-| `track_id` | string | "15_6_c" | Unique tracking identifier | Format: `{session_id}_{role_letter}` (c=child, t=therapist) |
-| `session_id` | string | "15_6" | Associated session | Links to Sessions (all) sheet |
-| `child_id` | integer | 15 | Associated child | Links to Children sheet |
-| `role` | string | "child" or "therapist" | Person's role in session | Determines applicable annotations |
-| `mask_source` | string | "SAM3" | Model used for segmentation | Segment Anything 3 (only current option) |
-| `mask_available` | boolean | True | Masks have been extracted | Binary/RLE encoded frame-by-frame |
-| `pose_source` | string | "MediaPipe" | Skeleton keypoint model | MediaPipe (current) or Sapiens (planned) |
-| `skeleton_available` | boolean | True | Pose keypoints available | 17pt (MediaPipe) or richer (Sapiens) |
-| `gaze_face_source` | string | "OpenFace2.0" | Model for head pose / gaze | OpenFace2.0 (current) or Pierre's model (planned) |
-| `gaze_available` | boolean | True | Gaze direction extracted | 3D normalized vector per frame |
-| `bbox_available` | boolean | False | Bounding boxes extracted | Alternative to mask-based tracking |
-| `notes` | string | "Mask track stable throughout" | QC or processing notes | Free-form |
+| Column | Type | Example | Definition |
+|--------|------|---------|-----------|
+| `track_id` | string | "15_6_c" | Unique tracking ID: `{session_id}_{role_letter}` |
+| `session_id` | string | "15_6" | Associated session |
+| `child_id` | int | 15 | Associated child |
+| `role` | string | "child" | "child" or "therapist" |
+| `mask_source` | string | "SAM3" | Segmentation model |
+| `mask_available` | bool | True | Masks extracted |
+| `pose_source` | string | "MediaPipe" | Skeleton model (MediaPipe or Sapiens) |
+| `skeleton_available` | bool | True | Pose keypoints available |
+| `gaze_face_source` | string | "OpenFace2.0" | Head pose/gaze model |
+| `gaze_available` | bool | True | Gaze direction extracted |
+| `bbox_available` | bool | False | Bounding boxes extracted |
+| `notes` | string | "Mask stable throughout" | QC notes |
 
 **Example rows**:
 ```
@@ -227,7 +274,7 @@ skeleton_available: True
 gaze_face_source: OpenFace2.0
 gaze_available: True
 bbox_available: False
-notes: "Child mask stable. Gaze confidence avg 0.92"
+notes: Child mask stable. Gaze confidence avg 0.92
 
 ---
 
@@ -242,14 +289,14 @@ skeleton_available: True
 gaze_face_source: OpenFace2.0
 gaze_available: True
 bbox_available: False
-notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
+notes: Therapist partially out-of-frame frames 100–120. Otherwise stable.
 ```
 
 ---
 
-## Section B: JSON Schemas
+### B. JSON Schemas
 
-### 1. sessions_inventory.json
+#### 1. sessions_inventory.json
 
 **Authoritative machine-generated inventory** of the Naomi archive.
 
@@ -290,28 +337,13 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
 }
 ```
 
-**Field Definitions**:
+**Key Fields**:
+- `session_id`: Normalized ID (child_id + session_number)
+- `all_files` / `all_folders`: Complete file tree
+- `*_available`: Boolean flags for data availability
+- `time_offset_ms`: Audio→Video synchronization offset
 
-| Field | Type | Definition |
-|-------|------|-----------|
-| `session_id` | string | Normalized ID (child_id + session_number) |
-| `session_date` | string | ISO 8601 date |
-| `naomi_folder_name` | string | Original folder name in archive |
-| `child_id` | int/string | Child ID or comma-separated for group sessions |
-| `session_type` | string | "INDIVIDUAL" or "GROUP" |
-| `session_number` | int | Sequential number per child (may repeat across children/dates) |
-| `all_files` | array | All file names in folder |
-| `all_folders` | array | All subdirectory names |
-| `mkv_files` | array | Video files (.mkv or .mp4) |
-| `audio_files` | array | Audio tracks (.wav or .mp3) |
-| `eaf_files` | array | ELAN exports (.eaf or .txt) |
-| `depth_files` | array | Azure Kinect depth streams |
-| `*_folder_available` | boolean | Whether that type of data exists |
-| `time_offset_ms` | integer | Audio→Video synchronization offset |
-
----
-
-### 2. Annotations JSON (`<session_id>_annotations.json`)
+#### 2. Annotations JSON (`<session_id>_annotations.json`)
 
 **Parsed ELAN tiers** in unified format.
 
@@ -370,11 +402,9 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
 }
 ```
 
----
+#### 3. Bounding Boxes (`<session_id>_bboxes.json`)
 
-### 3. Bounding Boxes (`<session_id>_bboxes.json`)
-
-**Per-frame bounding boxes** for each tracking entity (child, therapist).
+**Per-frame bounding boxes** for each tracking entity.
 
 ```json
 {
@@ -415,10 +445,6 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
 
 **bbox format**: `[x_min, y_min, x_max, y_max]` (pixel coordinates)
 
----
-
-### 4. Head Pose & Gaze
-
 #### 4a. Head Pose (`<track_id>_head_pose.json`)
 
 ```json
@@ -433,15 +459,6 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
       "pitch": 12.1,
       "roll": 3.4,
       "confidence": 0.98,
-      "is_valid": true
-    },
-    "1": {
-      "frame_no": 1,
-      "timestamp_sec": 0.033,
-      "yaw": -4.8,
-      "pitch": 12.3,
-      "roll": 3.2,
-      "confidence": 0.97,
       "is_valid": true
     }
   },
@@ -467,13 +484,6 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
       "gaze_vector": [0.15, -0.08, 0.98],
       "gaze_confidence": 0.92,
       "is_valid": true
-    },
-    "1": {
-      "frame_no": 1,
-      "timestamp_sec": 0.033,
-      "gaze_vector": [0.14, -0.09, 0.99],
-      "gaze_confidence": 0.91,
-      "is_valid": true
     }
   },
   "metadata": {
@@ -486,11 +496,9 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
 }
 ```
 
----
+#### 5. Skeleton Keypoints (`<track_id>_skeleton.json`)
 
-### 5. Skeleton Keypoints (`<track_id>_skeleton.json`)
-
-**Body pose keypoints** (17pt MediaPipe or finer Sapiens model).
+**Body pose keypoints** (17pt MediaPipe or finer Sapiens).
 
 ```json
 {
@@ -508,8 +516,7 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
       "timestamp_sec": 0.0,
       "keypoints": [
         {"name": "nose", "x": 300, "y": 200, "z": 0.5, "confidence": 0.99},
-        {"name": "left_eye", "x": 285, "y": 190, "z": 0.4, "confidence": 0.98},
-        {"name": "right_eye", "x": 315, "y": 190, "z": 0.4, "confidence": 0.98}
+        {"name": "left_eye", "x": 285, "y": 190, "z": 0.4, "confidence": 0.98}
       ],
       "frame_confidence": 0.97
     }
@@ -523,11 +530,9 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
 }
 ```
 
----
+#### 6. Tracking Metadata (`tracks.json`)
 
-### 6. Tracking Metadata (`tracks.json`)
-
-**Links track IDs to roles** and specifies processing status.
+**Links track IDs to roles** and processing status.
 
 ```json
 {
@@ -549,24 +554,14 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
         "gaze_3d": "heads/15_6_c_gaze_3d.json"
       },
       "gaze_status": "complete"
-    },
-    {
-      "track_id": "15_6_t",
-      "role": "therapist",
-      "mask_source": "SAM3",
-      "mask_status": "complete",
-      "pose_status": "complete",
-      "gaze_status": "complete"
     }
   ]
 }
 ```
 
----
+#### 7. Validation Report (`validation_report.json`)
 
-### 7. Validation Report (`validation_report.json`)
-
-**QA summary** generated during visualization step.
+**QA summary** generated during visualization.
 
 ```json
 {
@@ -591,7 +586,6 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
       "child": {
         "n_track_breaks": 3,
         "mean_break_duration_frames": 2,
-        "mean_break_duration_sec": 0.067,
         "status": "PASS_WITH_MINOR_ISSUES"
       },
       "therapist": {
@@ -609,27 +603,23 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
       "child": {
         "n_frames_with_gaze": 1750,
         "mean_confidence": 0.91,
-        "min_confidence": 0.72,
-        "frames_high_confidence_pct": 92.3,
         "status": "PASS"
       },
       "therapist": {
         "n_frames_with_gaze": 1760,
         "mean_confidence": 0.89,
-        "frames_high_confidence_pct": 88.1,
         "status": "PASS"
       }
     }
   },
   "overall_status": "VALID",
   "flagged_issues": [],
-  "recommended_next_step": "Ready for feature analysis"
+  "reviewed_by": "user",
+  "review_timestamp": "2024-12-15T14:30:00Z"
 }
 ```
 
----
-
-### 8. Tracking Validation Registry (`tracking_validation.json`)
+#### 8. Tracking Validation Registry (`tracking_validation.json`)
 
 **Master status file** tracking all sessions' processing progress.
 
@@ -659,15 +649,14 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
       "status": "needs_correction",
       "reviewer": "bob",
       "review_timestamp": "2024-12-15T16:00:00Z",
-      "notes": "Child 1 mask lost frames 500–520. Need to re-run SAM3 with adjusted parameters.",
+      "notes": "Child 1 mask lost frames 500–520. Need to re-run SAM3.",
       "manual_flags": ["mask_discontinuity", "child_1_tracking_loss"],
       "pipeline_stages_complete": [
         "annotation_parsing",
         "sam3_tracking",
         "pose_extraction",
         "visualization"
-      ],
-      "next_action": "Re-run SAM3 tracking with manual mask correction"
+      ]
     }
   ]
 }
@@ -675,21 +664,19 @@ notes: "Therapist partially out-of-frame frames 100–120. Otherwise stable."
 
 ---
 
-## Section C: CSV Formats (Frame-by-Frame Alignment)
+### C. CSV Formats
 
-### Annotations CSV (`<session_id>_annotations.csv`)
+#### Annotations CSV (`<session_id>_annotations.csv`)
 
 **Frame-by-frame tab-delimited alignment** of all tiers to video frames.
 
-```csv
+```
 frame_no	timestamp_sec	c15_CG	c15_CA	c15_CP	c15_CSP	t1_TP	t1_TSP	JA_c15_t1
 0	0.0	GU	AU	CSI	CP	TSI	T	False
 1	0.033	GU	AU	CSI	CP	TSI	T	False
-...
 127	4.23	GO	AO	CST	TC	TST	TC	False
 254	8.47	GO	AO	CST	TC	TSI	TC	True
-...
-1800	60.0	GT	AT	CST	TC	TST	TC	False
+1500	50.0	GT	AT	CST	TC	TST	TC	True
 ```
 
 **Columns**:
@@ -697,161 +684,192 @@ frame_no	timestamp_sec	c15_CG	c15_CA	c15_CP	c15_CSP	t1_TP	t1_TSP	JA_c15_t1
 - `timestamp_sec`: Seconds into video (frame_no / fps)
 - Each additional column = one ELAN tier
 - Cell values = ELAN codes (GU, GO, GT, AO, AT, etc.)
-- Empty cell or "NA" if that tier has no event at that frame
-
-**Purpose**: Direct alignment for video overlay and feature engineering
+- Empty or "NA" if tier has no event at that frame
 
 ---
 
-## Section D: File Naming Conventions
+## ELAN Annotation Codes
 
-### Processed Output Files
+### Individual Session Schema
 
-All files in `ROOT_Directory_Processed/SESSIONS/<session_id>/` follow these patterns:
+The ELAN `.eaf` file (exported as `.txt`) contains **tiers** — horizontal tracks coding specific behaviors.
+
+#### Gaze Tier (CG)
+
+| Code | Meaning |
+|------|---------|
+| `GO` | Gaze at Objects (session-related materials) |
+| `GT` | Gaze at Therapist (look at therapist's face/body) |
+| `GNO` | Gaze at Non-session objects (sink, shoes, jacket) |
+| `GU` | Gaze Undetermined |
+
+#### Attention Tier (CA)
+
+| Code | Meaning |
+|------|---------|
+| `AO` | Attending to Objects (session-related materials) |
+| `ANO` | Attending to Non-session objects |
+| `AU` | Attending Undetermined |
+
+#### Attention to Therapist (CAT)
+
+| Code | Meaning |
+|------|---------|
+| `AT` | Attending to Therapist |
+
+#### Position (CP)
+
+| Code | Meaning |
+|------|---------|
+| `CST` | Standing (two feet on ground) |
+| `CHO` | Hovering/leaning over table |
+| `CSI` | Sitting |
+| `CLF` | On the floor (lying down) |
+| `CGO` | Child gone (left room/not visible) |
+| `CRE` | Reaching (partial rise from seated) |
+| `CCR` | Crouch (knees bent, upper body forward) |
+
+#### Session Pattern (CSP)
+
+| Code | Meaning |
+|------|---------|
+| `CP` | Child creating/playing alone |
+| `COB` | Child observing (therapist creates without participation) |
+| `TC` | Together creating/discussing |
+| `PL` | Together playing |
+| `PRC` | Preparing/cleaning up |
+
+#### Common Action in Shared Engagement (CTCA)
+
+Used within CSP:TC, CSP:PL, or CSP:PRC:
+
+| Code | Meaning |
+|------|---------|
+| `OBJ_EXCHANGE` | Transfer of materials between child and therapist |
+| `ARTMAKING` | Object-based creation or sensory exploration |
+| `SYMBOLIC_PLAY` | Pretending/role-play |
+| `COORDINATED_PLAY` | Rule-governed or rhythmic physical interaction |
+| `CONVERSATION` | Reciprocal verbal interaction |
+| `CLEAN_UP_ACTIVITY` | Organizing/tidying |
+
+#### Joint Attention (JA)
+
+| Code | Meaning |
+|------|---------|
+| `TC` | Joint eye contact present (therapist ↔ child) |
+
+#### Therapist Tiers (TP, TSP, TV)
+
+Follow similar conventions with `T` prefix:
+- `TP` = Therapist Position (TST, TSI, TGO, TLF, TRE, TCR)
+- `TSP` = Therapist Session Pattern (T, TOB, TC, PL, PRC)
+- `TV` = Therapist Vocalization (TS, TNS)
+
+### Key Insight: Attention vs. Gaze Divergence
+
+**This is the paper's headline finding:**
+
+- **Attention (CA, CAT)**: Coded from behavioral orientation — is child engaging with object or therapist?
+- **Gaze (CG)**: Coded from eye direction only — where are they actually looking?
+
+These can **diverge**:
 
 ```
-annotations/
-  ├── <session_id>_annotations.json          # Parsed tiers
-  ├── <session_id>_annotations.csv           # Frame-by-frame alignment
-  └── <session_id>_annotations_schema.txt    # Human-readable tier legend
-
-tracking/
-  ├── masks/
-  │   ├── <session_id>_c_mask_frames.npz     # Child masks (NumPy)
-  │   └── <session_id>_t_mask_frames.npz     # Therapist masks (NumPy)
-  ├── bboxes/
-  │   └── <session_id>_bboxes.json           # All track bboxes
-  └── tracks.json                             # Metadata linking track_id→role
-
-features/
-  ├── heads/
-  │   ├── <track_id>_head_pose.json          # Yaw, pitch, roll
-  │   └── <track_id>_gaze_3d.json            # 3D gaze vector
-  └── skeleton/
-      ├── <track_id>_skeleton.json           # Keypoint coordinates
-      └── ...
-
-validation/
-  ├── validation_rendered.mp4                # Overlay video (masks + annotations)
-  ├── validation_report.json                 # QA metrics
-  └── validation_status.txt                  # Human-readable status
+Child is ATTENDING to therapist (CAT: AT)
+But GAZING at objects (CG: GO)
+→ Behavioral engagement ≠ visual focus
 ```
 
-**track_id format**: `<session_id>_<role_letter>`
-- `15_6_c` = Child in session 15_6
-- `15_6_t` = Therapist in session 15_6
+**Statistical Finding**:
+- Interactive activity time increased early→late: 72.6% → 82.8% (p=0.042)
+- **Gaze to therapist** increased: 13.6% → 24.6% (p=0.029) ← **Stronger signal**
+- Gaze to objects decreased: 80.6% → 67.0% (p=0.052, n.s.)
+- **Context-dependent**: Object-gaze while attending to therapist decreased (p=0.037), but while NOT attending to therapist unchanged (p=0.844)
+
+→ **Conclusion**: Gaze is a more sensitive marker of increasing social engagement than attention/interaction time alone.
+
+### Group Sessions (Different Schema)
+
+Group sessions use per-individual-prefixed tiers (X = child/individual number, Z = other party):
+
+```
+cX_CP     Child X position
+cX_CA     Child X attention (AO=object, AT_Z, AC_Z)
+cX_CI     Child X interaction (T_Z, C_Z)
+cX_CRE    Child X creating (TC_TZ, PL_TZ)
+cX_JA     Joint eye contact (T_Z)
+```
 
 ---
 
-## Appendix: ELAN Tier Code Reference
+## T4 Tracking Pipeline Guide
 
-### Individual Session Codes
+Complete step-by-step walkthrough for processing a single session from raw to validated outputs.
 
-**Gaze (CG)**:
-- `GO` = Gaze at Objects
-- `GT` = Gaze at Therapist
-- `GNO` = Gaze at Non-session objects
-- `GU` = Gaze Undetermined
+### Overview
 
-**Attention (CA)**:
-- `AO` = Attending to Objects
-- `ANO` = Attending to Non-session objects
-- `AU` = Attending Undetermined
+| Step | Task | Input | Output | Duration |
+|------|------|-------|--------|----------|
+| 1 | Inventory Check | Session name | Confirmation | <1 min |
+| 2 | Annotation Parse | ELAN .txt | JSON + CSV | 1 min |
+| 3 | SAM3 Tracking | Video | Masks, bboxes | 2–4 hrs (GPU) |
+| 4 | Pose & Gaze | Video + bboxes | Head pose, gaze, skeleton | 1–2 hrs (GPU) |
+| 5 | Visualization | All above | MP4 video + report | 5–10 min |
+| 6 | QA & Register | Validation report | Status update | <1 min |
 
-**Attention to Therapist (CAT)**:
-- `AT` = Attending to Therapist
-
-**Position (CP)**:
-- `CST` = Child Standing
-- `CHO` = Child Hovering
-- `CSI` = Child Sitting
-- `CLF` = Child on Floor
-- `CGO` = Child Gone (left room/not visible)
-- `CRE` = Child Reaching
-- `CCR` = Child Crouch
-
-**Session Pattern (CSP)**:
-- `CP` = Child creating/Playing alone
-- `COB` = Child Observing (therapist creates)
-- `TC` = Together Creating
-- `PL` = Together Playing
-- `PRC` = Preparing/Cleanup
-
-**Common Action in Shared Engagement (CTCA)**:
-- `OBJ_EXCHANGE` = Object transfer
-- `ARTMAKING` = Creating/sculpting
-- `SYMBOLIC_PLAY` = Role-play
-- `COORDINATED_PLAY` = Rhythmic play
-- `CONVERSATION` = Verbal interaction
-- `CLEAN_UP_ACTIVITY` = Tidying
-
-**Joint Attention (JA)**:
-- `TC` = Joint eye contact present
-
-**Therapist Position (TP)**, **Pattern (TSP)**, **Vocalization (TV)**:
-- Follow similar conventions with `T` prefix
+**Total**: ~3–6 hours per 30-minute session (GPU-bound)
 
 ---
 
-# T4 Tracking Pipeline & HowTo Guide
+### Step 1: Raw Ingestion & Inventory Check
 
-## Processing Steps for a New Session (Complete Walkthrough)
+#### Goal
+Locate raw session in Naomi archive and verify it's registered in `sessions_inventory.json`.
 
-This guide walks through all steps to take a raw session folder and produce validation outputs.
-
----
-
-## Step 1: Raw Ingestion & Inventory Check
-
-### Goal
-Locate the raw session in the Naomi archive and verify it's registered in `sessions_inventory.json`.
-
-### Action
+#### Action
 
 ```bash
 # 1.1 List raw session folder
 ls /ROOT_Directory_Raw/SESSIONS/ | grep "10-1-2024_#6"
 # Output: 10-1-2024_#6_INDIVIDUAL_[15]/
 
-# 1.2 Verify session is in authoritative inventory
+# 1.2 Verify session in inventory
 python -c "
 import json
 with open('GENERAL_FILES/sessions_inventory.json') as f:
     inv = json.load(f)
-# Check if session_id '15_6' exists
 session = [s for s in inv if s['session_id'] == '15_6'][0]
 print(f'Session {session['session_id']} found:')
 print(f'  - Video: {session['mkv_files']}')
 print(f'  - Audio: {session['audio_files']}')
 print(f'  - ELAN: {session['eaf_files']}')
-print(f'  - Time offset: {session.get('time_offset_ms', 'NOT SET')}')
+print(f'  - Time offset: {session.get('time_offset_ms', 'NOT SET')} ms')
 "
 ```
 
-### Output
-Session metadata summary:
+#### Output
 ```
 Session 15_6 found:
   - Video: ['10-1-2024_#6_INDIVIDUAL_[15]/raw_video.mkv']
   - Audio: ['10-1-2024_#6_INDIVIDUAL_[15]/audio_track.wav']
   - ELAN: ['10-1-2024_#6_INDIVIDUAL_[15]_BL.txt']
-  - Time offset: 1250  # milliseconds; video is 1250ms ahead of audio
+  - Time offset: 1250 ms
 ```
 
-### Next
-If video, audio, and ELAN file all exist → proceed to Step 2.  
-If any are missing → flag in `GENERAL_FILES/tracking_validation.json` with status `missing_assets`.
+#### Next
+If video, audio, and ELAN file exist → proceed to Step 2.  
+If missing → flag in `tracking_validation.json` with status `missing_assets`.
 
 ---
 
-## Step 2: Annotation Parsing & Audio Alignment
+### Step 2: Annotation Parsing & Audio Alignment
 
-### Goal
+#### Goal
 Convert ELAN .txt export (tab-delimited tiers) into standardized JSON and frame-by-frame CSV.
 
-### Background: ELAN Export Format
+#### Background
 
-ELAN exports a `.eaf` file as tab-delimited text:
+ELAN exports `.eaf` as tab-delimited text:
 
 ```
 tier	start_hms	start_sec	end_hms	end_sec	dur_sec	value
@@ -860,12 +878,12 @@ c15_CG	00:04:14.273	254.273	00:04:50.079	294.079	39.806	GO
 c15_CA	00:04:14.273	254.273	00:05:10.843	310.843	56.57	AO
 ```
 
-→ `c15_CG` is **child 15's gaze**, with value `GO` (gaze at objects).  
-→ `c15_CA` is **child 15's attention**, with value `AO` (attending to objects).
+- `c15_CG` = child 15's gaze, value `GO` (gaze at objects)
+- `c15_CA` = child 15's attention, value `AO` (attending to objects)
 
-**Important**: Audio in ELAN is often offset from video. `time_offset_ms = 1250` means video starts 1250ms *before* audio.
+**Important**: Audio is often offset from video. `time_offset_ms = 1250` means video starts 1250ms *before* audio.
 
-### Action
+#### Action
 
 ```bash
 # 2.1 Run annotation parser
@@ -879,11 +897,9 @@ python scripts/convert_annotations.py \
 ls -lh /ROOT_Directory_Processed/SESSIONS/15_6/annotations/
 ```
 
-### Output Files
+#### Outputs
 
-**File 1: `15_6_annotations.json`**  
-Unified JSON format:
-
+**15_6_annotations.json** (unified JSON):
 ```json
 {
   "session_id": "15_6",
@@ -909,19 +925,6 @@ Unified JSON format:
           "code_meaning": "Gaze at therapist"
         }
       ]
-    },
-    "c15_CA": {
-      "tier_name": "c15_CA",
-      "tier_meaning": "Child 15, Attending to",
-      "events": [
-        {
-          "start_sec": 254.273,
-          "end_sec": 310.843,
-          "duration_sec": 56.57,
-          "code": "AO",
-          "code_meaning": "Attending to objects"
-        }
-      ]
     }
   },
   "metadata": {
@@ -932,26 +935,18 @@ Unified JSON format:
 }
 ```
 
-**File 2: `15_6_annotations.csv`**  
-Frame-by-frame (aligned to video):
-
+**15_6_annotations.csv** (frame-by-frame):
 ```csv
 frame_no,timestamp_sec,c15_CG,c15_CA,c15_CP,c15_CSP,t1_TP,t1_TSP,JA_c15_t1
 0,0.0,GU,AU,CSI,CP,TSI,T,False
 127,4.23,GO,AO,CST,TC,TST,TC,False
 254,8.47,GO,AO,CST,TC,TSI,TC,True
-...
 1500,50.0,GT,AT,CST,TC,TST,TC,True
 ```
 
-→ Each row = one frame (at video FPS, typically 30fps)  
-→ Each column = one tier (child gaze, attention, position, etc.)
-
-### Next
-Verify annotations look reasonable:
+#### Verification
 
 ```bash
-# Check annotation coverage
 python -c "
 import json
 with open('15_6_annotations.json') as f:
@@ -959,25 +954,26 @@ with open('15_6_annotations.json') as f:
     print(f'Coverage: {annot['metadata']['annotation_coverage_pct']}%')
     for tier_name, tier_data in annot['tiers'].items():
         total_dur = sum(e['duration_sec'] for e in tier_data['events'])
-        print(f'  {tier_name}: {total_dur:.1f}s of {annot['metadata']['total_session_duration_sec']}s')
+        pct = total_dur / annot['metadata']['total_session_duration_sec'] * 100
+        print(f'  {tier_name}: {total_dur:.1f}s ({pct:.1f}%)')
 "
 ```
 
 ---
 
-## Step 3: SAM3 Mask & Tracking Execution
+### Step 3: SAM3 Mask & Tracking Execution
 
-### Goal
+#### Goal
 Run Meta's Segment Anything 3 (SAM3) to extract per-person segmentation masks and bounding boxes.
 
-### Background
+#### Background
 
-SAM3 is a foundation model that segments objects frame-by-frame. For therapy sessions, we run it to:
+SAM3 is a foundation model that segments objects frame-by-frame:
 1. Extract masks for **child** and **therapist** independently
 2. Derive **bounding boxes** (min/max X, Y per frame)
 3. Map track IDs to roles: `15_6_c` = child, `15_6_t` = therapist
 
-### Action
+#### Action
 
 ```bash
 # 3.1 Run SAM3 tracking
@@ -989,29 +985,23 @@ python scripts/run_sam3_tracking.py \
   --device cuda:0 \
   --verbose
 
-# 3.2 Monitor progress
-# (Takes ~2–4 hours for 30-min session on GPU; check logs)
+# 3.2 Monitor progress (2–4 hours for 30-min session)
 tail -f logs/15_6_sam3.log
 ```
 
-### Output Files
+#### Outputs
 
-**File 1: `masks/15_6_c_mask_frames.npz`**  
-Compressed NumPy array (binary masks, frame-by-frame):
-
+**masks/15_6_c_mask_frames.npz** (binary masks, frame-by-frame):
 ```python
 import numpy as np
 masks_c = np.load('masks/15_6_c_mask_frames.npz')
-# Shape: (n_frames, height, width) → (1800, 1080, 1920)
+# Shape: (1800, 1080, 1920) — frames × height × width
 # dtype: uint8 (0=background, 1=child)
-frame_0_mask = masks_c['frames'][0]  # First frame mask
+frame_0_mask = masks_c['frames'][0]
 print(frame_0_mask.shape)  # (1080, 1920)
-print(frame_0_mask.sum() / frame_0_mask.size * 100)  # % pixels = child
 ```
 
-**File 2: `bboxes/15_6_bboxes.json`**  
-Bounding boxes per track per frame:
-
+**bboxes/15_6_bboxes.json**:
 ```json
 {
   "session_id": "15_6",
@@ -1021,25 +1011,23 @@ Bounding boxes per track per frame:
     "15_6_c": {
       "role": "child",
       "frames": {
-        "0": [120, 150, 400, 600],  # [x_min, y_min, x_max, y_max]
-        "1": [121, 149, 401, 599],
-        "10": [125, 145, 405, 595]
-      }
+        "0": [120, 150, 400, 600],
+        "1": [121, 149, 401, 599]
+      },
+      "frames_with_bbox": 1795
     },
     "15_6_t": {
       "role": "therapist",
       "frames": {
-        "0": [800, 200, 1100, 900],
-        "1": [801, 199, 1101, 899]
-      }
+        "0": [800, 200, 1100, 900]
+      },
+      "frames_with_bbox": 1789
     }
   }
 }
 ```
 
-**File 3: `tracks.json`**  
-Metadata linking track IDs to roles:
-
+**tracks.json** (metadata):
 ```json
 {
   "session_id": "15_6",
@@ -1047,40 +1035,33 @@ Metadata linking track IDs to roles:
     {
       "track_id": "15_6_c",
       "role": "child",
-      "child_id": 15,
       "mask_source": "SAM3",
-      "mask_file": "masks/15_6_c_mask_frames.npz",
-      "bbox_source": "derived_from_mask"
+      "mask_file": "masks/15_6_c_mask_frames.npz"
     },
     {
       "track_id": "15_6_t",
       "role": "therapist",
-      "child_id": 15,
       "mask_source": "SAM3",
-      "mask_file": "masks/15_6_t_mask_frames.npz",
-      "bbox_source": "derived_from_mask"
+      "mask_file": "masks/15_6_t_mask_frames.npz"
     }
   ]
 }
 ```
 
-### Troubleshooting
+#### Troubleshooting
 
-- **Tracks get lost mid-session**: Common with SAM3. Check visualization in Step 4.
-- **Therapist not detected**: May be mostly out-of-frame. Flag for manual review.
-- **Performance**: GPU memory ~10–12GB for 1080p at 30fps. Use smaller batches if needed.
-
-### Next
-Proceed to Step 4 to visualize masks and check tracking quality.
+- **Tracks lost mid-session**: Common with SAM3. Check visualization in Step 5.
+- **Therapist not detected**: May be out-of-frame. Flag for manual review.
+- **Performance**: GPU memory ~10–12GB for 1080p at 30fps.
 
 ---
 
-## Step 4: Pose & Gaze Extraction
+### Step 4: Pose & Gaze Extraction
 
-### Goal
+#### Goal
 Extract head pose (yaw, pitch, roll) and gaze direction (3D vector) for both child and therapist.
 
-### Action
+#### Action
 
 ```bash
 # 4.1 Extract head pose & gaze (OpenFace 2.0)
@@ -1096,15 +1077,14 @@ python scripts/extract_skeleton.py \
   --session_id 15_6 \
   --video_path /ROOT_Directory_Raw/SESSIONS/10-1-2024_#6_INDIVIDUAL_[15]/raw_video.mkv \
   --bboxes /ROOT_Directory_Processed/SESSIONS/15_6/tracking/bboxes/15_6_bboxes.json \
-  --model mediapipe \  # or 'sapiens' for finer poses
+  --model mediapipe \
   --output_dir /ROOT_Directory_Processed/SESSIONS/15_6/features/ \
   --device cuda:0
 ```
 
-### Output Files
+#### Outputs
 
-**File 1: `heads/15_6_c_head_pose.json`**
-
+**heads/15_6_c_head_pose.json**:
 ```json
 {
   "track_id": "15_6_c",
@@ -1115,51 +1095,36 @@ python scripts/extract_skeleton.py \
       "pitch": 12.1,
       "roll": 3.4,
       "confidence": 0.98
-    },
-    "1": {
-      "timestamp_sec": 0.033,
-      "yaw": -4.8,
-      "pitch": 12.3,
-      "roll": 3.2,
-      "confidence": 0.97
     }
   }
 }
 ```
 
-**File 2: `heads/15_6_c_gaze_3d.json`**
-
+**heads/15_6_c_gaze_3d.json**:
 ```json
 {
   "track_id": "15_6_c",
   "frames": {
     "0": {
       "timestamp_sec": 0.0,
-      "gaze_vector": [0.15, -0.08, 0.98],  # Normalized 3D vector (x, y, z)
+      "gaze_vector": [0.15, -0.08, 0.98],
       "gaze_confidence": 0.92
-    },
-    "1": {
-      "timestamp_sec": 0.033,
-      "gaze_vector": [0.14, -0.09, 0.99],
-      "gaze_confidence": 0.91
     }
   }
 }
 ```
 
-**File 3: `skeleton/15_6_c_skeleton.json`**
-
+**skeleton/15_6_c_skeleton.json**:
 ```json
 {
   "track_id": "15_6_c",
   "model": "mediapipe",
-  "keypoints": ["nose", "left_eye", "right_eye", "left_ear", "right_ear", ...],
+  "keypoint_names": ["nose", "left_eye", "right_eye", ...],
   "frames": {
     "0": {
       "timestamp_sec": 0.0,
       "keypoints": [
-        {"name": "nose", "x": 300, "y": 200, "confidence": 0.99},
-        {"name": "left_eye", "x": 285, "y": 190, "confidence": 0.98}
+        {"name": "nose", "x": 300, "y": 200, "confidence": 0.99}
       ]
     }
   }
@@ -1168,15 +1133,15 @@ python scripts/extract_skeleton.py \
 
 ---
 
-## Step 5: Validation & Visualization
+### Step 5: Validation & Visualization
 
-### Goal
-Overlay masks, track IDs, and ELAN annotation tiers onto video for **manual QA**.
+#### Goal
+Overlay masks, track IDs, and ELAN annotation tiers onto video for manual QA.
 
-### Action
+#### Action
 
 ```bash
-# 5.1 Render validation video (3–5 min for 30-min session)
+# 5.1 Render validation video
 python scripts/visualize_tracking.py \
   --session_id 15_6 \
   --video_path /ROOT_Directory_Raw/SESSIONS/10-1-2024_#6_INDIVIDUAL_[15]/raw_video.mkv \
@@ -1186,98 +1151,66 @@ python scripts/visualize_tracking.py \
   --output_video /ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_rendered.mp4 \
   --output_report /ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_report.json \
   --fps 30 \
-  --overlay_panels child:therapist:joint \
   --verbose
 ```
 
-### Output
+#### Outputs
 
-**File 1: `validation_rendered.mp4`**  
-Video with 3 side-by-side panels:
-- **Child panel**: child mask + skeleton + gaze vector + ELAN tier overlay (CSP, CG, CA)
-- **Therapist panel**: therapist mask + skeleton + gaze vector + ELAN tier overlay (TSP)
-- **Joint panel**: Combined view + "Mutual Gaze" highlight when both looking at each other
+**validation_rendered.mp4**: Video with 3 side-by-side panels:
+- **Child panel**: child mask + skeleton + gaze vector + ELAN tier overlay
+- **Therapist panel**: therapist mask + skeleton + gaze vector + ELAN tier overlay
+- **Joint panel**: Combined view + "Mutual Gaze" highlight
 
-Text overlay at bottom:
-```
-Frame: 254 | Time: 00:08:30 | Session: 15_6
-Child 15: CG=GO (gaze@objects) | CA=AO (attend@objects) | CSP=TC (together)
-Therapist: TP=TST (standing) | TSP=TC (together)
-Gaze Mutual? FALSE | Head-to-Head: 0.82m
-```
-
-**File 2: `validation_report.json`**
-
+**validation_report.json**:
 ```json
 {
   "session_id": "15_6",
+  "validation_timestamp": "2024-12-15T14:30:00Z",
   "validation_checks": {
     "mask_completeness": {
-      "child": {"n_frames_with_mask": 1795, "pct": 99.7, "status": "PASS"},
-      "therapist": {"n_frames_with_mask": 1789, "pct": 99.4, "status": "PASS"}
+      "child": {"n_frames_with_mask": 1795, "coverage_pct": 99.7, "status": "PASS"},
+      "therapist": {"n_frames_with_mask": 1789, "coverage_pct": 99.4, "status": "PASS"}
     },
     "track_continuity": {
-      "child": {
-        "n_track_breaks": 3,
-        "avg_break_duration_frames": 2,
-        "status": "PASS_WITH_MINOR_ISSUES"
-      },
-      "therapist": {
-        "n_track_breaks": 0,
-        "avg_break_duration_frames": 0,
-        "status": "PASS"
-      }
+      "child": {"n_track_breaks": 3, "status": "PASS_WITH_MINOR_ISSUES"},
+      "therapist": {"n_track_breaks": 0, "status": "PASS"}
     },
     "annotation_alignment": {
-      "child_gaze_events": 42,
-      "child_attention_events": 38,
-      "events_with_masks": 40,
       "pct_covered": 95.2,
       "status": "PASS"
     },
     "gaze_quality": {
-      "child": {
-        "frames_with_gaze": 1750,
-        "mean_confidence": 0.91,
-        "status": "PASS"
-      },
-      "therapist": {
-        "frames_with_gaze": 1760,
-        "mean_confidence": 0.89,
-        "status": "PASS"
-      }
+      "child": {"mean_confidence": 0.91, "status": "PASS"},
+      "therapist": {"mean_confidence": 0.89, "status": "PASS"}
     }
   },
   "overall_status": "VALID",
-  "flagged_issues": [],
-  "reviewed_by": "user",
-  "review_timestamp": "2024-12-15T14:30:00Z"
+  "flagged_issues": []
 }
 ```
 
-### Next
+#### Quality Checklist
+
 Watch the validation video. Look for:
 - ✓ Masks follow child/therapist throughout
 - ✓ Track IDs stable (no sudden jumps)
 - ✓ Gaze vectors point reasonably (toward objects/therapist)
 - ✓ ELAN tier text matches visible behavior
 
-Flag issues → mark as `needs_correction` in Step 6.
-
 ---
 
-## Step 6: Quality Assurance & Registration
+### Step 6: Quality Assurance & Registration
 
-### Goal
+#### Goal
 Summarize validation results and register session status in master tracking file.
 
-### Action
+#### Action
 
 ```bash
-# 6.1 Manual review (watch validation_rendered.mp4)
+# 6.1 Watch validation video
 # Open: /ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_rendered.mp4
 
-# 6.2 If video looks good, mark as VALID
+# 6.2 If video looks good → VALID
 python scripts/validate_session.py \
   --session_id 15_6 \
   --status valid \
@@ -1285,7 +1218,7 @@ python scripts/validate_session.py \
   --notes "Masks clean, gaze tracking stable. Ready for analysis." \
   --tracking_validation_file /ROOT_Directory_Processed/GENERAL_FILES/tracking_validation.json
 
-# 6.3 If issues found, mark as NEEDS_CORRECTION
+# 6.3 If issues found → NEEDS_CORRECTION
 python scripts/validate_session.py \
   --session_id 15_6 \
   --status needs_correction \
@@ -1294,7 +1227,7 @@ python scripts/validate_session.py \
   --tracking_validation_file /ROOT_Directory_Processed/GENERAL_FILES/tracking_validation.json
 ```
 
-### Output: `tracking_validation.json`
+#### Output: tracking_validation.json
 
 ```json
 {
@@ -1305,10 +1238,16 @@ python scripts/validate_session.py \
       "reviewer": "alice",
       "review_timestamp": "2024-12-15T14:45:00Z",
       "notes": "Masks clean, gaze tracking stable. Ready for analysis.",
-      "validation_report": "/ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_report.json",
-      "validation_video": "/ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_rendered.mp4",
-      "pipeline_stages_complete": ["annotation_parsing", "sam3_tracking", "pose_extraction", "visualization"],
-      "next_stage": "automated_feature_analysis"
+      "pipeline_stages_complete": [
+        "annotation_parsing",
+        "sam3_tracking",
+        "pose_extraction",
+        "gaze_extraction",
+        "visualization",
+        "validation_report"
+      ],
+      "validation_report_file": "/ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_report.json",
+      "validation_video_file": "/ROOT_Directory_Processed/SESSIONS/15_6/validation/validation_rendered.mp4"
     }
   ]
 }
@@ -1316,26 +1255,11 @@ python scripts/validate_session.py \
 
 ---
 
-## Summary: Full Pipeline Execution
-
-| Step | Task | Input | Output | Time |
-|------|------|-------|--------|------|
-| 1 | Inventory Check | Session name | Confirmation | <1 min |
-| 2 | Annotation Parse | ELAN .txt | JSON + CSV | 1 min |
-| 3 | SAM3 Tracking | Video | Masks, bboxes | 2–4 hrs (GPU) |
-| 4 | Pose & Gaze | Video + bboxes | Head pose, gaze, skeleton | 1–2 hrs (GPU) |
-| 5 | Visualization | All above | MP4 video + report | 5–10 min |
-| 6 | QA & Register | Validation report | Status update | <1 min |
-
-**Total Time**: ~3–6 hours per 30-minute session (mostly GPU-bound)
-
----
-
-## Checkpoints & Common Errors
+## Processing Checkpoints
 
 ### Checkpoint A: After Annotation Parsing (Step 2)
+
 ```bash
-# Check annotation JSON parses and has events
 python -c "
 import json
 with open('15_6_annotations.json') as f:
@@ -1343,37 +1267,44 @@ with open('15_6_annotations.json') as f:
     if not a['tiers']:
         print('ERROR: No tiers found!')
     else:
-        print(f'OK: {len(a['tiers'])} tiers, {sum(len(t['events']) for t in a['tiers'].values())} events')
+        n_events = sum(len(t['events']) for t in a['tiers'].values())
+        print(f'OK: {len(a['tiers'])} tiers, {n_events} events')
 "
 ```
 
+**Expected**: ≥2 tiers (gaze, attention), ≥20 events
+
 ### Checkpoint B: After SAM3 (Step 3)
+
 ```bash
-# Verify mask files exist and have expected shape
 python -c "
 import numpy as np
 masks_c = np.load('15_6/tracking/masks/15_6_c_mask_frames.npz')
-print(f'Child mask shape: {masks_c['frames'].shape}')  # Should be (n_frames, H, W)
-print(f'Frames with mask: {(masks_c['frames'] > 0).sum(axis=(1,2)).mean():.1f}% avg')
+print(f'Child mask shape: {masks_c['frames'].shape}')
+pct_frames = (masks_c['frames'].max(axis=(1,2)) > 0).mean() * 100
+print(f'Frames with mask: {pct_frames:.1f}%')
 "
 ```
 
+**Expected**: >95% frame coverage
+
 ### Checkpoint C: After Pose Extraction (Step 4)
+
 ```bash
-# Verify gaze confidence is reasonable
 python -c "
 import json
 with open('15_6/features/heads/15_6_c_gaze_3d.json') as f:
     g = json.load(f)
-    conf_vals = [g['frames'][str(i)]['gaze_confidence'] for i in range(10)]
-    print(f'Gaze confidence (first 10 frames): {conf_vals}')
-    print(f'Mean: {sum(conf_vals)/len(conf_vals):.3f}')  # Should be ~0.90+
+    confs = [g['frames'][str(i)]['gaze_confidence'] for i in range(10)]
+    print(f'Gaze confidence (first 10): {sum(confs)/len(confs):.3f}')
 "
 ```
 
+**Expected**: Mean confidence >0.85
+
 ### Checkpoint D: After Visualization (Step 5)
+
 ```bash
-# Check validation report has no critical flags
 python -c "
 import json
 with open('15_6/validation/validation_report.json') as f:
@@ -1381,20 +1312,79 @@ with open('15_6/validation/validation_report.json') as f:
     print(f'Overall: {r['overall_status']}')
     if r['flagged_issues']:
         print(f'Issues: {r['flagged_issues']}')
-    else:
-        print('No critical issues.')
 "
+```
+
+**Expected**: `overall_status` = "VALID"
+
+---
+
+## Quick Reference
+
+### File Locations
+
+| What | Where |
+|------|-------|
+| Raw sessions | `ROOT_Directory_Raw/SESSIONS/<folder>/` |
+| Excel metadata | `GENERAL_FILES/CHUV_data_tables.xlsx` |
+| Session inventory | `GENERAL_FILES/sessions_inventory.json` |
+| Processing status | `GENERAL_FILES/tracking_validation.json` |
+| Parsed annotations | `ROOT_Directory_Processed/SESSIONS/<session_id>/annotations/` |
+| Masks (SAM3) | `ROOT_Directory_Processed/SESSIONS/<session_id>/tracking/masks/` |
+| Bounding boxes | `ROOT_Directory_Processed/SESSIONS/<session_id>/tracking/bboxes/` |
+| Gaze vectors | `ROOT_Directory_Processed/SESSIONS/<session_id>/features/heads/` |
+| Skeleton keypoints | `ROOT_Directory_Processed/SESSIONS/<session_id>/features/skeleton/` |
+| Validation video | `ROOT_Directory_Processed/SESSIONS/<session_id>/validation/validation_rendered.mp4` |
+
+### Useful Commands
+
+**Find sessions ready for processing**:
+```bash
+python -c "
+import pandas as pd
+df = pd.read_excel('GENERAL_FILES/CHUV_data_tables.xlsx', sheet_name='Sessions (all)')
+ready = df[(df['coded_bei_xuan'] == True) & (df['psifx_processed'] == False)]
+print(f'Ready to process: {len(ready)} sessions')
+for _, row in ready.head(5).iterrows():
+    print(f\"  {row['session_id']}: {row['naomi_folder_name']}\")
+"
+```
+
+**Check processing status**:
+```bash
+python -c "
+import json
+with open('GENERAL_FILES/tracking_validation.json') as f:
+    records = json.load(f)['validation_records']
+    statuses = {}
+    for r in records:
+        s = r['status']
+        statuses[s] = statuses.get(s, 0) + 1
+    for status, count in sorted(statuses.items()):
+        print(f'{status}: {count}')
+"
+```
+
+**List all processed files for a session**:
+```bash
+find ROOT_Directory_Processed/SESSIONS/15_6 -type f | sort
 ```
 
 ---
 
-## Next: Automated Analysis Phase
+## Summary
 
-Once a session is marked `valid`, proceed to:
-- **Feature engineering** (relational metrics: G2G, G2H, H2H)
-- **Statistical analysis** (early vs. late session comparisons)
-- **Paper-ready outputs** (figures, tables, p-values)
+This documentation provides:
 
+1. **Complete directory architecture** — where all data lives
+2. **Full schema reference** — all JSON, CSV, and Excel structures with examples
+3. **ELAN tier definitions** — complete behavioral coding scheme with key insight
+4. **Step-by-step T4 pipeline** — exact commands and expected outputs for each processing stage
+5. **Quality checkpoints** — verification steps at each stage
+6. **Quick reference** — file locations and useful commands
 
-            ├── validation_report.json      # QA metrics (mask completeness, track stability, annotation overlap)
-            └── validation_status.txt       # Status: valid | needs_correction | in_progress
+For questions on specific schemas or processing steps, cross-reference the table of contents above.
+
+**Maintained by**: Idiap × CHUV Project Team  
+**Status**: T3/T4 Complete (Structure & Tracking Pipeline Documented)  
+**Last Updated**: 2024-12-TBD
