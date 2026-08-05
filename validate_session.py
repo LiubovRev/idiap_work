@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Validation & QA Registration Script (T4 Phase)
+Validation & QA Registration Script 
 
 Purpose:
   - Check if a processed session passes quality thresholds
