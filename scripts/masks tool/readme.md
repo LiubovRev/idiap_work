@@ -14,7 +14,7 @@ pip install opencv-python numpy
 
 ```bash
 python mask_tool.py inspect \
-  --session_dir /home/lrevutska/Documents/chuv_machine_downloads/videos/7_INDIVIDUAL_14
+  --session_dir /path/to/video/session
 ```
 
 Controls:
@@ -42,7 +42,7 @@ Decisions are saved automatically to:
 
 ```bash
 python mask_tool.py apply \
-  --session_dir /home/lrevutska/Documents/chuv_machine_downloads/videos/7_INDIVIDUAL_14
+  --session_dir /path/to/video/session
 ```
 
 Merged masks are written to `MaskDir/`. Deleted tracks are moved to files ending in `_DELETED.mp4` rather than permanently removed.
@@ -51,7 +51,7 @@ Merged masks are written to `MaskDir/`. Deleted tracks are moved to files ending
 
 ```bash
 python mask_tool.py annotate \
-  --session_dir /home/lrevutska/Documents/chuv_machine_downloads/videos/7_INDIVIDUAL_14 \
+  --session_dir /path/to/video/session \
   --time_offset 167
 ```
 
@@ -70,7 +70,7 @@ To inspect, apply decisions, and create the annotated video in one workflow:
 
 ```bash
 python mask_tool.py all \
-  --session_dir /home/lrevutska/Documents/chuv_machine_downloads/videos/7_INDIVIDUAL_14 \
+  --session_dir /path/to/video/session \
   --time_offset 167
 ```
 
