@@ -19,16 +19,17 @@ from pathlib import Path
 import cv2
 
 # ============================== Settings ====================================
-base_path = Path("/home/liubov/Bureau/new/10-1-2024_#6_INDIVIDUAL_[15]")
-tracking_video = base_path / "visualization_tracking.mp4"   # <-- your existing tracking/mask video
+base_path = Path("/home/lrevutska/Documents/chuv_machine_downloads/videos/7_INDIVIDUAL_14")
+visualization_dir = base_path / "VisualizationVideos"
+tracking_video = visualization_dir / "visualization_a.mp4"   # <-- existing tracking/mask video
 mask_dir = base_path / "MaskDir"
-child_mask_video = mask_dir / "1.mp4"        # <-- CHECK: set to whichever object number is the child
-therapist_mask_video = mask_dir / "2.mp4"    # <-- CHECK: set to whichever object number is the therapist
+child_mask_video = mask_dir / "0.mp4"        # <-- CHECK: set to whichever object number is the child
+therapist_mask_video = mask_dir / "therapist_merged.mp4"    # <-- CHECK: set to whichever object number is the therapist
 annotations_txt_pattern = "*.txt"                             # glob resolved against base_path
 clip_id_filter = None                                          # e.g. "c14" if the txt mixes clips
 output_video = base_path / "visualization_annotated.mp4"
 
-time_offset_sec = 210.0   # <-- SET THIS: raw-video time (sec) that frame 0 of tracking_video corresponds to
+time_offset_sec = 167.0   # <-- SET THIS: raw-video time (sec) that frame 0 of tracking_video corresponds to
 
 # tier_code -> (panel_group, display_name); unknown tiers fall back to "joint"
 TIER_INFO = {
