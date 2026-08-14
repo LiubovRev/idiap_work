@@ -1,6 +1,5 @@
-# CHUV Art Therapy Gaze Analysis: Complete Documentation
-
-**Status**: T3/T4 Phase (Structure & Tracking Pipeline)
+# CHUV Art Therapy Gaze Analysis 
+**Status**: Structure & Tracking Pipeline (in progress!)
 
 ---
 
