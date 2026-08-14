@@ -1,83 +1,49 @@
 #!/usr/bin/env python3
+
 """
 create_sessions_metadata.py
-===========================
 
-Build/update sessions_metadata.json from:
+Create a clean sessions_metadata.json from sessions_inventory.json.
 
-1. sessions_inventory.json
-   - authoritative dataset/session information
-
-2. Raw session directories
-   - actual files currently present
-
-3. Existing sessions_metadata.json
-   - preserves manually added metadata such as:
-       * synchronization offsets
-       * calibration
-       * tracking validation
-       * processing information
-       * notes
-
-The resulting sessions_metadata.json is the central registry for
-raw data, annotations, tracking, feature extraction and future processing.
-
-Example:
-
-python create_sessions_metadata.py \
-    --sessions-dir ~/Documents/chuv_machine_downloads/videos \
-    --inventory ~/Documents/idiap_work/tables/sessions_inventory.json \
-    --output ~/Documents/idiap_work/tables/sessions_metadata.json \
-    --existing-metadata ~/Documents/idiap_work/tables/sessions_metadata.json
+Principles:
+- sessions_inventory.json is the source of truth for discovered files/resources.
+- Use inventory filenames directly; do not try to match annotations by session_id.
+- Paths stored in metadata are relative to the raw data root.
+- Supports .m4a audio files.
+- Supports recursively discovered resources from the inventory.
+- Preserves existing metadata where appropriate.
+- Does not create script/code entries.
+- Keeps metadata focused on identity, recording, resources, annotations and paths.
 """
 
 import argparse
 import json
-import re
-from copy import deepcopy
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List
 
 
-# ============================================================================
-# Constants
-# ============================================================================
+SCHEMA_VERSION = "2.2"
 
-SCHEMA_VERSION = "1.0"
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(message)s"
+)
 
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov"}
-AUDIO_EXTENSIONS = {".wav", ".m4a", ".mp3", ".flac"}
-DEPTH_EXTENSIONS = {".bin", ".raw", ".depth"}
-
-ANNOTATION_EXTENSIONS = {".eaf"}
-TEXT_EXTENSIONS = {".txt"}
-
-PROCESSING_STATUS_VALUES = {
-    "not_processed",
-    "processing",
-    "done",
-    "failed",
-    "blocked",
-    "unknown",
-}
+logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# Generic helpers
-# ============================================================================
+# ---------------------------------------------------------------------
+# IO
+# ---------------------------------------------------------------------
 
-def now_iso():
-    return datetime.now().isoformat()
-
-
-def load_json(path):
-    """Load JSON file."""
+def load_json(path: Path) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_json(data, path):
-    """Save JSON with readable formatting."""
+def save_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w", encoding="utf-8") as f:
@@ -89,334 +55,201 @@ def save_json(data, path):
         )
 
 
-def merge_dict_preserve_existing(old, new):
-    """
-    Recursively merge dictionaries.
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 
-    Values already present in `old` are preserved when `new` contains
-    None/empty values.
+def unique(items: List[str]) -> List[str]:
+    """Preserve order while removing duplicates."""
+    seen = set()
+    result = []
 
-    This is important because manually entered metadata such as
-    synchronization offsets must not be destroyed by regeneration.
-    """
-    if not isinstance(old, dict) or not isinstance(new, dict):
-        return deepcopy(old)
-
-    result = deepcopy(old)
-
-    for key, value in new.items():
-
-        if key not in result:
-            result[key] = deepcopy(value)
-            continue
-
-        old_value = result[key]
-
-        if isinstance(old_value, dict) and isinstance(value, dict):
-            result[key] = merge_dict_preserve_existing(
-                old_value,
-                value
-            )
-
-        elif value is not None and value != "":
-            result[key] = deepcopy(value)
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
 
     return result
 
 
-def relative_path(path, root):
-    """Return path relative to root using POSIX separators."""
-    try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)
-
-
-# ============================================================================
-# Session ID helpers
-# ============================================================================
-
-def normalize_session_id(session_id):
+def normalize_child_ids(session: Dict[str, Any]) -> List[str]:
     """
-    Create a stable normalized ID.
+    Inventory currently uses child_id, including values such as:
+        "14"
+        "1-3"
 
-    Examples:
-        1-2-2024_#10_INDIVIDUAL_[14]
-            -> 10_individual_14
-
-        1-2-2024_#9_GROUP_[1-3]
-            -> 9_group_1_3
+    Convert them into the normalized list:
+        ["14"]
+        ["1", "3"]
     """
 
-    if not session_id:
+    value = session.get("child_id")
+
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [str(x) for x in value]
+
+    value = str(value).strip()
+
+    if not value:
+        return []
+
+    # Group sessions can appear as "1-3"
+    if session.get("session_type") == "GROUP" and "-" in value:
+        return [x for x in value.split("-") if x]
+
+    return [value]
+
+
+def normalize_session_number(value: Any) -> Any:
+    if value is None:
         return None
 
-    session_id = str(session_id)
+    value = str(value).strip()
 
-    match = re.search(
-        r"#(\d+)_([A-Z]+)_\[(.*?)\]",
-        session_id
-    )
+    if value.isdigit():
+        return int(value)
 
-    if match:
-        session_number = match.group(1)
-        session_type = match.group(2).lower()
-        children = re.sub(
-            r"[^0-9]+",
-            "_",
-            match.group(3)
-        ).strip("_")
-
-        return f"{session_number}_{session_type}_{children}"
-
-    # Fallback
-    normalized = re.sub(
-        r"[^A-Za-z0-9]+",
-        "_",
-        session_id
-    ).strip("_")
-
-    return normalized.lower()
+    return value
 
 
-def find_matching_session_directory(session_id, sessions_dir):
+def make_normalized_session_id(
+    session_number: Any,
+    session_type: str,
+    child_ids: List[str]
+) -> str:
+
+    number = str(session_number)
+    session_type = str(session_type).lower()
+
+    children = "_".join(child_ids)
+
+    if children:
+        return f"{number}_{session_type}_{children}"
+
+    return f"{number}_{session_type}"
+
+
+def relative_path(
+    session_id: str,
+    filename: str
+) -> str:
     """
-    Find actual session directory.
+    Build a portable path relative to the raw data root.
 
-    Exact match is preferred.
-
-    Inventory IDs can contain dates and # symbols, while some downloaded
-    directories may have simplified names, so a few fallback strategies
-    are used.
+    Example:
+        1-2-2024_#10_INDIVIDUAL_[14]/camera_a.mkv
     """
 
-    if not sessions_dir.exists():
-        return None
-
-    # Exact match
-    exact = sessions_dir / session_id
-    if exact.is_dir():
-        return exact
-
-    # Case-insensitive exact match
-    for directory in sessions_dir.iterdir():
-        if directory.is_dir():
-            if directory.name.lower() == session_id.lower():
-                return directory
-
-    # Normalize both sides
-    target = normalize_session_id(session_id)
-
-    for directory in sessions_dir.iterdir():
-
-        if not directory.is_dir():
-            continue
-
-        if normalize_session_id(directory.name) == target:
-            return directory
-
-    return None
+    return str(Path(session_id) / filename)
 
 
-# ============================================================================
-# File classification
-# ============================================================================
+# ---------------------------------------------------------------------
+# Inventory → recording
+# ---------------------------------------------------------------------
 
-def classify_file(file):
-    """
-    Classify one file.
+def build_recording(
+    session: Dict[str, Any]
+) -> Dict[str, Any]:
 
-    Returns:
-        category
-    """
+    mkv_files = [
+        str(x)
+        for x in session.get("mkv_files", [])
+    ]
 
-    name = file.name.lower()
-    suffix = file.suffix.lower()
+    audio_files = [
+        str(x)
+        for x in session.get("audio_files", [])
+    ]
 
-    # ------------------------------------------------------------------
-    # Cameras
-    # ------------------------------------------------------------------
+    # Camera files are explicitly named in the inventory.
+    camera_a = [
+        f for f in mkv_files
+        if Path(f).stem.lower() == "camera_a"
+    ]
 
-    if suffix in VIDEO_EXTENSIONS:
+    camera_b = [
+        f for f in mkv_files
+        if Path(f).stem.lower() == "camera_b"
+    ]
 
-        if "camera_a" in name or re.search(r"\bcam[_-]?a\b", name):
-            return "camera_a"
+    # Fallback in case inventory contains unusual capitalization.
+    if not camera_a:
+        camera_a = [
+            f for f in mkv_files
+            if "camera_a" in Path(f).stem.lower()
+        ]
 
-        if "camera_b" in name or re.search(r"\bcam[_-]?b\b", name):
-            return "camera_b"
+    if not camera_b:
+        camera_b = [
+            f for f in mkv_files
+            if "camera_b" in Path(f).stem.lower()
+        ]
 
-        # Processed / visualization videos
-        if any(
-            keyword in name
-            for keyword in [
-                "tracking",
-                "annotated",
-                "visual",
-                "openpose",
-                "output",
-                "mask",
-                "validation"
-            ]
+    depth_files = []
+
+    for filename in session.get("all_files", []):
+        name = str(filename).lower()
+
+        if (
+            "depth" in name
+            or name.endswith(".depth")
+            or ".depth." in name
         ):
-            return "visualization"
+            depth_files.append(str(filename))
 
-        return "video_other"
+    return {
+        "camera_a": {
+            "available": bool(camera_a),
+            "files": camera_a
+        },
 
-    # ------------------------------------------------------------------
-    # Audio
-    # ------------------------------------------------------------------
+        "camera_b": {
+            "available": bool(camera_b),
+            "files": camera_b
+        },
 
-    if suffix in AUDIO_EXTENSIONS:
-        return "audio"
-
-    # ------------------------------------------------------------------
-    # Depth
-    # ------------------------------------------------------------------
-
-    if suffix in DEPTH_EXTENSIONS:
-        if "depth" in name:
-            return "depth"
-
-    # ------------------------------------------------------------------
-    # Annotations
-    # ------------------------------------------------------------------
-
-    if suffix == ".eaf":
-        return "elan"
-
-    if suffix == ".txt":
-        if any(
-            keyword in name
-            for keyword in [
-                "annotation",
-                "audioTime".lower(),
-                "wakEE".lower(),
-                "session",
-                "individual"
-            ]
-        ):
-            return "text_annotation"
-
-    # ------------------------------------------------------------------
-    # Metadata/config
-    # ------------------------------------------------------------------
-
-    if name == "metadata.json":
-        return "metadata_json"
-
-    if name == "config_reid.json":
-        return "reid_config"
-
-    # ------------------------------------------------------------------
-    # Tracking
-    # ------------------------------------------------------------------
-
-    if "mask_decision" in name:
-        return "mask_decision"
-
-    if "mask" in name:
-        return "mask"
-
-    if "tracking" in name or "track" in name:
-        return "tracking"
-
-    if "box" in name or "bbox" in name:
-        return "bounding_box"
-
-    if "skeleton" in name or "pose" in name:
-        return "skeleton"
-
-    if "head" in name:
-        return "head"
-
-    if "gaze" in name:
-        return "gaze"
-
-    return "other"
-
-
-# ============================================================================
-# Directory scanning
-# ============================================================================
-
-def scan_session_directory(session_dir):
-    """
-    Scan a session directory recursively.
-
-    Returns a structured inventory of files actually present.
-    """
-
-    result = {
-        "camera_a": [],
-        "camera_b": [],
-        "audio": [],
-        "depth": [],
-        "elan": [],
-        "text": [],
-        "metadata": [],
-        "reid_config": [],
-        "tracking": [],
-        "masks": [],
-        "mask_decisions": [],
-        "bounding_boxes": [],
-        "head": [],
-        "skeleton": [],
-        "head_pose": [],
-        "gaze": [],
-        "visualizations": [],
-        "other": [],
+        "audio": {
+            "available": bool(audio_files),
+            "files": audio_files
+        }
     }
 
-    if session_dir is None or not session_dir.exists():
-        return result
 
-    for file in sorted(session_dir.rglob("*")):
-
-        if not file.is_file():
-            continue
-
-        category = classify_file(file)
-
-        path = relative_path(file, session_dir)
-
-        if category in result:
-            result[category].append(path)
-        else:
-            result["other"].append(path)
-
-    return result
-
-
-# ============================================================================
+# ---------------------------------------------------------------------
 # Existing resources
-# ============================================================================
+# ---------------------------------------------------------------------
 
-def build_existing_resources(inventory_entry):
-    """
-    Information already available according to sessions_inventory.json.
-    """
+def build_existing_resources(
+    session: Dict[str, Any]
+) -> Dict[str, bool]:
 
     return {
         "bounding_boxes": bool(
-            inventory_entry.get(
+            session.get(
                 "bounding_boxes_folder_available",
                 False
             )
         ),
-        "skeletons": bool(
-            inventory_entry.get(
+
+        "skeleton": bool(
+            session.get(
                 "skeletons_folder_available",
                 False
             )
         ),
+
         "visualizations": bool(
-            inventory_entry.get(
+            session.get(
                 "Visualizations_folder_available",
                 False
             )
         ),
+
         "reid_config": bool(
-            inventory_entry.get(
+            session.get(
                 "config_reid_json_available",
                 False
             )
@@ -424,820 +257,487 @@ def build_existing_resources(inventory_entry):
     }
 
 
-# ============================================================================
-# Recording metadata
-# ============================================================================
-
-def build_recording_metadata(scan):
-
-    return {
-        "cameras": {
-            "camera_a": {
-                "available": bool(scan["camera_a"]),
-                "files": scan["camera_a"],
-                "fps": None,
-                "resolution": None,
-                "duration_s": None
-            },
-            "camera_b": {
-                "available": bool(scan["camera_b"]),
-                "files": scan["camera_b"],
-                "fps": None,
-                "resolution": None,
-                "duration_s": None
-            }
-        },
-
-        "audio": {
-            "available": bool(scan["audio"]),
-            "files": scan["audio"],
-            "sample_rate_hz": None,
-            "duration_s": None
-        },
-
-        "depth": {
-            "available": bool(scan["depth"]),
-            "files": scan["depth"]
-        }
-    }
-
-
-# ============================================================================
+# ---------------------------------------------------------------------
 # Annotations
-# ============================================================================
+# ---------------------------------------------------------------------
 
-def build_annotations(scan):
+def build_annotations(
+    session: Dict[str, Any]
+) -> Dict[str, Any]:
+
+    eaf_files = unique([
+        str(x)
+        for x in session.get("eaf_files", [])
+        if x
+    ])
+
+    txt_files = unique([
+        str(x)
+        for x in session.get("txt_files", [])
+        if x
+    ])
 
     return {
         "elan": {
-            "available": bool(scan["elan"]),
-            "files": scan["elan"],
-            "format": "eaf",
-            "converted": False,
-            "converted_files": [],
-            "version": None,
-            "annotation_types": []
+            "available": bool(eaf_files),
+            "files": eaf_files
         },
 
         "text_annotations": {
-            "available": bool(scan["text"]),
-            "files": scan["text"]
-        },
-
-        "clinical": {
-            "available": False,
-            "files": [],
-            "version": None,
-            "annotation_types": []
+            "available": bool(txt_files),
+            "files": txt_files
         }
     }
 
 
-# ============================================================================
-# Tracking
-# ============================================================================
-
-def build_tracking(scan):
-
-    # Important:
-    # presence of mask-related files does NOT automatically mean
-    # tracking is completed or validated.
-
-    has_masks = bool(scan["masks"])
-    has_tracking = bool(scan["tracking"])
-    has_boxes = bool(scan["bounding_boxes"])
-
-    tracking_status = "not_processed"
-
-    if has_tracking or has_masks:
-        tracking_status = "done"
-
-    return {
-        "method": "SAM3",
-
-        "status": tracking_status,
-
-        "tracks": [],
-
-        "masks": {
-            "status": "done" if has_masks else "not_processed",
-            "files": scan["masks"],
-            "video": None
-        },
-
-        "bounding_boxes": {
-            "status": "done" if has_boxes else "not_processed",
-            "files": scan["bounding_boxes"]
-        },
-
-        "validation": {
-            "status": "not_validated",
-            "decisions_file": (
-                scan["mask_decisions"][0]
-                if scan["mask_decisions"]
-                else None
-            ),
-            "validation_video": None,
-            "validated_by": None,
-            "validated_at": None,
-            "notes": ""
-        }
-    }
-
-
-# ============================================================================
-# Features
-# ============================================================================
-
-def build_features(scan):
-
-    return {
-
-        "head": {
-            "status": "done" if scan["head"] else "not_processed",
-            "method": None,
-            "files": scan["head"]
-        },
-
-        "skeleton": {
-            "status": (
-                "done"
-                if scan["skeleton"]
-                else "not_processed"
-            ),
-            "method": None,
-            "files": scan["skeleton"]
-        },
-
-        "head_pose": {
-            "status": (
-                "done"
-                if scan["head_pose"]
-                else "not_processed"
-            ),
-            "method": None,
-            "files": scan["head_pose"]
-        },
-
-        "gaze": {
-            "status": (
-                "done"
-                if scan["gaze"]
-                else "not_processed"
-            ),
-            "method": None,
-            "input": "head_boxes",
-            "files": scan["gaze"]
-        },
-
-        "gaze_follow": {
-            "status": "not_processed",
-            "method": None,
-            "files": []
-        },
-
-        "clinical_markers": {
-            "status": "not_processed",
-            "files": []
-        }
-    }
-
-
-# ============================================================================
-# Processing
-# ============================================================================
-
-def build_processing(scan):
-
-    psifx_detected = any(
-        "psifx" in path.lower()
-        for category in scan.values()
-        if isinstance(category, list)
-        for path in category
-    )
-
-    sam3_detected = bool(
-        scan["masks"] or
-        scan["tracking"] or
-        scan["mask_decisions"]
-    )
-
-    mediapipe_detected = any(
-        "mediapipe" in path.lower()
-        for category in scan.values()
-        if isinstance(category, list)
-        for path in category
-    )
-
-    return {
-        "psifx": {
-            "status": "done" if psifx_detected else "not_processed",
-            "version": None,
-            "processed_at": None,
-            "outputs": []
-        },
-
-        "sam3": {
-            "status": "done" if sam3_detected else "not_processed",
-            "version": None,
-            "processed_at": None,
-            "outputs": (
-                scan["masks"] +
-                scan["tracking"] +
-                scan["mask_decisions"]
-            )
-        },
-
-        "mediapipe": {
-            "status": (
-                "done"
-                if mediapipe_detected
-                else "not_processed"
-            ),
-            "version": None,
-            "processed_at": None,
-            "outputs": []
-        },
-
-        "overall_status": "pending"
-    }
-
-
-# ============================================================================
+# ---------------------------------------------------------------------
 # Paths
-# ============================================================================
+# ---------------------------------------------------------------------
 
-def build_paths(session_dir, scan):
+def build_paths(
+    session: Dict[str, Any],
+    recording: Dict[str, Any],
+    annotations: Dict[str, Any]
+) -> Dict[str, Any]:
 
-    raw_session_directory = (
-        str(session_dir)
-        if session_dir is not None
-        else None
+    session_id = session["session_id"]
+
+    raw = {
+        "camera_a": [
+            relative_path(session_id, f)
+            for f in recording["camera_a"]["files"]
+        ],
+
+        "camera_b": [
+            relative_path(session_id, f)
+            for f in recording["camera_b"]["files"]
+        ],
+
+        "audio": [
+            relative_path(session_id, f)
+            for f in recording["audio"]["files"]
+        ]
+    }
+
+    processed = {
+        "tracking": [],
+        "masks": [],
+        "mask_decisions": [],
+        "bounding_boxes": [],
+        "skeleton": [],
+        "head": [],
+        "head_pose": [],
+        "gaze": [],
+        "gaze_follow": [],
+        "clinical_markers": [],
+        "visualizations": []
+    }
+
+    # -----------------------------------------------------------------
+    # Existing resource files from the inventory.
+    #
+    # We inspect all_files/folder_structure recursively so that nested
+    # resources can be represented without hard-coding their structure.
+    # -----------------------------------------------------------------
+
+    all_files = [
+        str(x)
+        for x in session.get("all_files", [])
+    ]
+
+    folder_structure = session.get(
+        "folder_structure",
+        {}
     )
 
+    folders = folder_structure.get(
+        "folders",
+        {}
+    )
+
+    recursive_files = []
+
+    def collect_files(
+        node: Dict[str, Any],
+        prefix: str = ""
+    ) -> None:
+
+        for filename in node.get("files", []):
+            if prefix:
+                recursive_files.append(
+                    str(Path(prefix) / filename)
+                )
+            else:
+                recursive_files.append(str(filename))
+
+        for folder_name, child in node.get(
+            "folders",
+            {}
+        ).items():
+
+            child_prefix = (
+                str(Path(prefix) / folder_name)
+                if prefix
+                else folder_name
+            )
+
+            collect_files(
+                child,
+                child_prefix
+            )
+
+    collect_files(folders)
+
+    all_resource_files = unique(
+        all_files + recursive_files
+    )
+
+    # Don't duplicate raw recordings/annotations into processed paths.
+    raw_names = set(
+        recording["camera_a"]["files"]
+        + recording["camera_b"]["files"]
+        + recording["audio"]["files"]
+        + session.get("eaf_files", [])
+        + session.get("txt_files", [])
+    )
+
+    for file_path in all_resource_files:
+
+        filename = Path(file_path).name.lower()
+
+        if file_path in raw_names:
+            continue
+
+        if filename.endswith(".eaf") or filename.endswith(".txt"):
+            continue
+
+        relative = relative_path(
+            session_id,
+            file_path
+        )
+
+        lower_path = file_path.lower()
+
+        if "bounding_boxes" in lower_path:
+            processed["bounding_boxes"].append(relative)
+
+        elif "skeleton" in lower_path:
+            processed["skeleton"].append(relative)
+
+        elif "visualization" in lower_path:
+            processed["visualizations"].append(relative)
+
+        elif "mask" in lower_path:
+            processed["masks"].append(relative)
+
     return {
-        "raw_session_directory": raw_session_directory,
+        "raw_session_directory": session_id,
 
-        "processed_session_directory": None,
+        "raw": raw,
 
-        "raw": {
-            "camera_a": scan["camera_a"],
-            "camera_b": scan["camera_b"],
-            "audio": scan["audio"],
-            "depth": scan["depth"]
-        },
-
-        "annotations": {
-            "elan": scan["elan"],
-            "text": scan["text"]
-        },
-
-        "processed": {
-            "tracking": scan["tracking"],
-            "masks": scan["masks"],
-            "mask_decisions": scan["mask_decisions"],
-            "bounding_boxes": scan["bounding_boxes"],
-            "head": scan["head"],
-            "skeleton": scan["skeleton"],
-            "head_pose": scan["head_pose"],
-            "gaze": scan["gaze"],
-            "gaze_follow": [],
-            "clinical_markers": [],
-            "visualizations": scan["visualizations"]
-        }
+        "processed": processed
     }
 
 
-# ============================================================================
-# QC
-# ============================================================================
-
-def build_quality_control(
-    inventory_entry,
-    session_dir,
-    scan
-):
-
-    missing_assets = []
-    warnings = []
-
-    if not scan["camera_a"]:
-        missing_assets.append("camera_a")
-
-    if not scan["camera_b"]:
-        missing_assets.append("camera_b")
-
-    if not scan["audio"]:
-        warnings.append("No audio file found")
-
-    if not session_dir:
-        warnings.append(
-            "Raw session directory could not be matched"
-        )
-
-    if inventory_entry.get("eaf_files") and not scan["elan"]:
-        warnings.append(
-            "ELAN files reported by sessions_inventory "
-            "but not found in current session directory"
-        )
-
-    return {
-        "missing_assets": missing_assets,
-        "processing_errors": [],
-        "warnings": warnings,
-        "notes": ""
-    }
-
-
-# ============================================================================
-# Session builder
-# ============================================================================
+# ---------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------
 
 def build_session_metadata(
-    inventory_entry,
-    sessions_dir,
-    old_session=None
-):
+    session: Dict[str, Any]
+) -> Dict[str, Any]:
 
-    session_id = inventory_entry["session_id"]
+    session_id = session["session_id"]
 
-    session_dir = find_matching_session_directory(
-        session_id,
-        sessions_dir
+    session_type = session.get(
+        "session_type",
+        "UNKNOWN"
     )
 
-    scan = scan_session_directory(session_dir)
-
-    child_ids = [
-        str(child)
-        for child in str(
-            inventory_entry.get("child_id", "")
-        ).split("-")
-        if child
-    ]
-
-    session_type = inventory_entry.get(
-        "session_type"
+    session_number = normalize_session_number(
+        session.get("session_number")
     )
 
-    session_number_raw = inventory_entry.get(
-        "session_number"
+    child_ids = normalize_child_ids(session)
+
+    recording = build_recording(session)
+
+    annotations = build_annotations(session)
+
+    existing_resources = build_existing_resources(
+        session
     )
 
-    try:
-        session_number = int(session_number_raw)
-    except (TypeError, ValueError):
-        session_number = session_number_raw
+    paths = build_paths(
+        session,
+        recording,
+        annotations
+    )
 
-    # ------------------------------------------------------------
-    # Children
-    # ------------------------------------------------------------
-
-    children = [
-        {
-            "child_id": child_id,
-            "track_ids": []
-        }
-        for child_id in child_ids
-    ]
-
-    # ------------------------------------------------------------
-    # Base metadata
-    # ------------------------------------------------------------
-
-    metadata = {
+    return {
+        "session_id": session_id,
 
         "identity": {
-            "session_id": session_id,
-            "normalized_session_id":
-                normalize_session_id(session_id),
-
-            "original_folder_name": (
-                session_dir.name
-                if session_dir
-                else None
-            ),
-
+            "date": session.get("session_date"),
             "session_type": session_type,
             "session_number": session_number,
-            "child_ids": child_ids,
-            "date": inventory_entry.get("session_date")
+            "child_ids": child_ids
         },
 
-        "participants": {
-            "children": children,
-            "clinicians": [],
-            "other_participants": []
-        },
+        "recording": recording,
 
-        "recording": build_recording_metadata(scan),
+        "existing_resources": existing_resources,
 
-        "existing_resources":
-            build_existing_resources(inventory_entry),
+        "annotations": annotations,
 
-        "synchronization": {
-            "status": "unknown",
-
-            "offsets_ms": {
-                "audio_to_camera_a": None,
-                "camera_b_to_camera_a": None,
-                "elan_to_camera_a": None
-            },
-
-            "method": None,
-            "reference_event": None,
-            "confidence": None,
-            "notes": ""
-        },
-
-        "calibration": {
-
-            "spatial": {
-                "status": "unknown",
-                "camera_pair": [
-                    "camera_a",
-                    "camera_b"
-                ],
-                "method": None,
-                "file": None,
-                "notes": ""
-            },
-
-            "temporal": {
-                "status": "unknown",
-                "method": None,
-                "file": None,
-                "notes": ""
-            }
-        },
-
-        "annotations":
-            build_annotations(scan),
-
-        "tracking":
-            build_tracking(scan),
-
-        "features":
-            build_features(scan),
-
-        "processing":
-            build_processing(scan),
-
-        "paths":
-            build_paths(
-                session_dir,
-                scan
-            ),
-
-        "quality_control":
-            build_quality_control(
-                inventory_entry,
-                session_dir,
-                scan
-            ),
-
-        "provenance": {
-            "metadata_created_at": now_iso(),
-            "metadata_updated_at": now_iso(),
-            "last_processed_at": None
-        }
+        "paths": paths
     }
 
-    # ------------------------------------------------------------
-    # Preserve manually maintained metadata
-    # ------------------------------------------------------------
 
-    if old_session:
+# ---------------------------------------------------------------------
+# Safe merge
+# ---------------------------------------------------------------------
 
-        metadata = merge_dict_preserve_existing(
-            old_session,
-            metadata
+def merge_session(
+    old: Dict[str, Any],
+    new: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Inventory-derived fields are refreshed.
+
+    Unknown fields from an existing metadata file are preserved,
+    so manually added research information is not destroyed.
+
+    The clean inventory structure remains authoritative for:
+      identity
+      recording
+      existing_resources
+      annotations
+      paths/raw
+    """
+
+    if not old:
+        return new
+
+    merged = dict(old)
+
+    # These sections are generated from the inventory and should
+    # always be refreshed.
+    authoritative_sections = [
+        "session_id",
+        "identity",
+        "recording",
+        "existing_resources",
+        "annotations"
+    ]
+
+    for key in authoritative_sections:
+        if key in new:
+            merged[key] = new[key]
+
+    # Paths are partly inventory-derived.
+    if "paths" not in merged:
+        merged["paths"] = new["paths"]
+    else:
+        merged_paths = dict(merged["paths"])
+
+        merged_paths["raw_session_directory"] = (
+            new["paths"]["raw_session_directory"]
         )
 
-        # These are fields that should ALWAYS reflect current filesystem
-        # rather than stale metadata.
+        merged_paths["raw"] = new["paths"]["raw"]
 
-        metadata["identity"]["original_folder_name"] = (
-            session_dir.name
-            if session_dir
-            else metadata["identity"].get(
-                "original_folder_name"
-            )
-        )
+        # Preserve existing processed outputs.
+        if "processed" not in merged_paths:
+            merged_paths["processed"] = new["paths"]["processed"]
 
-        metadata["recording"] = build_recording_metadata(scan)
+        merged["paths"] = merged_paths
 
-        metadata["existing_resources"] = \
-            build_existing_resources(
-                inventory_entry
-            )
-
-        metadata["paths"] = build_paths(
-            session_dir,
-            scan
-        )
-
-        # Preserve manual tracking validation.
-        old_tracking = old_session.get(
-            "tracking",
-            {}
-        )
-
-        if old_tracking.get("validation"):
-            metadata["tracking"]["validation"] = \
-                old_tracking["validation"]
-
-        # Preserve manual synchronization.
-        if old_session.get("synchronization"):
-            metadata["synchronization"] = \
-                merge_dict_preserve_existing(
-                    old_session["synchronization"],
-                    metadata["synchronization"]
-                )
-
-        # Preserve manual calibration.
-        if old_session.get("calibration"):
-            metadata["calibration"] = \
-                merge_dict_preserve_existing(
-                    old_session["calibration"],
-                    metadata["calibration"]
-                )
-
-        # Preserve provenance creation timestamp.
-        metadata["provenance"][
-            "metadata_created_at"
-        ] = old_session.get(
-            "provenance",
-            {}
-        ).get(
-            "metadata_created_at",
-            now_iso()
-        )
-
-        metadata["provenance"][
-            "metadata_updated_at"
-        ] = now_iso()
-
-    return metadata
+    return merged
 
 
-# ============================================================================
+# ---------------------------------------------------------------------
 # Main
-# ============================================================================
+# ---------------------------------------------------------------------
 
-def main():
+def main() -> None:
 
     parser = argparse.ArgumentParser(
-        description=__doc__
-    )
-
-    parser.add_argument(
-        "--sessions-dir",
-        required=True,
-        type=Path,
-        help="Directory containing raw session folders"
+        description=(
+            "Create clean sessions_metadata.json "
+            "from sessions_inventory.json"
+        )
     )
 
     parser.add_argument(
         "--inventory",
         required=True,
-        type=Path,
-        help="sessions_inventory.json"
+        help="Path to sessions_inventory.json"
     )
 
     parser.add_argument(
         "--output",
-        required=True,
-        type=Path,
-        help="Output sessions_metadata.json"
-    )
-
-    parser.add_argument(
-        "--existing-metadata",
-        type=Path,
         default=None,
-        help="Existing sessions_metadata.json to preserve manual metadata"
+        help=(
+            "Output metadata path. "
+            "Default: next to inventory."
+        )
     )
 
     args = parser.parse_args()
 
-    print()
-    print("=" * 80)
-    print("CHUV SESSION METADATA")
-    print("=" * 80)
+    inventory_path = Path(
+        args.inventory
+    )
 
-    # ------------------------------------------------------------------
-    # Load inventory
-    # ------------------------------------------------------------------
+    if not inventory_path.exists():
+        raise FileNotFoundError(
+            f"Inventory not found: {inventory_path}"
+        )
 
-    inventory = load_json(args.inventory)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else inventory_path.parent
+        / "sessions_metadata.json"
+    )
+
+    inventory = load_json(
+        inventory_path
+    )
 
     if not isinstance(inventory, list):
         raise ValueError(
-            "sessions_inventory.json must contain a JSON list."
+            "sessions_inventory.json must contain a list."
         )
 
-    print(
-        f"[info] Loaded inventory: "
-        f"{len(inventory)} sessions"
-    )
+    # ---------------------------------------------------------------
+    # Existing metadata
+    # ---------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Load existing metadata
-    # ------------------------------------------------------------------
+    if output_path.exists():
 
-    existing_data = {}
-
-    if (
-        args.existing_metadata
-        and args.existing_metadata.exists()
-    ):
-
-        existing_data = load_json(
-            args.existing_metadata
+        existing_metadata = load_json(
+            output_path
         )
 
-        if not isinstance(existing_data, dict):
-            raise ValueError(
-                "Existing sessions_metadata.json "
-                "must contain a JSON object."
+        existing_sessions = existing_metadata.get(
+            "sessions",
+            {}
+        )
+
+        created_at = existing_metadata.get(
+            "dataset",
+            {}
+        ).get(
+            "created_at",
+            datetime.now().isoformat(
+                timespec="milliseconds"
             )
-
-        print(
-            f"[info] Loaded existing metadata: "
-            f"{args.existing_metadata}"
         )
 
-    existing_sessions = existing_data.get(
-        "sessions",
-        {}
-    )
+        logger.info(
+            f"Updating existing metadata: {output_path}"
+        )
 
-    # ------------------------------------------------------------------
-    # Dataset metadata
-    # ------------------------------------------------------------------
+    else:
 
-    created_at = (
-        existing_data
-        .get("dataset", {})
-        .get("created_at")
-        or now_iso()
-    )
+        existing_sessions = {}
 
-    root_processed = (
-        existing_data
-        .get("dataset", {})
-        .get("root_directory_processed")
-    )
+        created_at = datetime.now().isoformat(
+            timespec="milliseconds"
+        )
 
-    metadata = {
+        logger.info(
+            f"Creating metadata: {output_path}"
+        )
 
-        "schema_version": SCHEMA_VERSION,
-
-        "dataset": {
-            "name": "CHUV-ADHDArtTherapy",
-
-            "created_at": created_at,
-
-            "updated_at": now_iso(),
-
-            "root_directory_raw":
-                str(args.sessions_dir),
-
-            "root_directory_processed":
-                root_processed
-        },
-
-        "sessions": {}
-    }
-
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
     # Build sessions
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
 
-    matched = 0
-    unmatched = 0
+    sessions = {}
 
-    for index, inventory_entry in enumerate(inventory, start=1):
+    added = 0
+    updated = 0
 
-        session_id = inventory_entry.get(
+    for inventory_session in inventory:
+
+        session_id = inventory_session.get(
             "session_id"
         )
 
         if not session_id:
-            print(
-                f"[warning] Inventory entry #{index} "
-                f"has no session_id - skipped"
+            logger.warning(
+                "Skipping inventory entry without session_id"
             )
             continue
 
-        old_session = existing_sessions.get(
-            session_id
+        new_metadata = build_session_metadata(
+            inventory_session
         )
 
-        session = build_session_metadata(
-            inventory_entry=inventory_entry,
-            sessions_dir=args.sessions_dir,
-            old_session=old_session
-        )
+        if session_id in existing_sessions:
 
-        metadata["sessions"][session_id] = session
+            new_metadata = merge_session(
+                existing_sessions[session_id],
+                new_metadata
+            )
 
-        raw_dir = session["paths"][
-            "raw_session_directory"
-        ]
+            updated += 1
 
-        if raw_dir:
-            matched += 1
-            marker = "✓"
         else:
-            unmatched += 1
-            marker = "⚠"
+            added += 1
 
-        recording = session["recording"]
+        sessions[session_id] = new_metadata
 
-        camera_a = recording["cameras"]["camera_a"][
-            "available"
-        ]
+    # ---------------------------------------------------------------
+    # Dataset metadata
+    # ---------------------------------------------------------------
 
-        camera_b = recording["cameras"]["camera_b"][
-            "available"
-        ]
+    now = datetime.now().isoformat(
+        timespec="milliseconds"
+    )
 
-        audio = recording["audio"]["available"]
+    metadata = {
+        "schema_version": SCHEMA_VERSION,
 
-        print(
-            f"{marker} {session_id}"
-            f" | A={camera_a}"
-            f" B={camera_b}"
-            f" audio={audio}"
-        )
+        "dataset": {
+            "name": "CHUV-ADHDArtTherapy",
+            "created_at": created_at,
+            "updated_at": now,
+            "root_directory_raw": None,
+            "root_directory_processed": None
+        },
 
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
+        "sessions": sessions
+    }
 
     save_json(
-        metadata,
-        args.output
+        output_path,
+        metadata
     )
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
-
-    sessions = metadata["sessions"]
-
-    total = len(sessions)
-
-    camera_a = sum(
-        1
-        for s in sessions.values()
-        if s["recording"]["cameras"]["camera_a"]["available"]
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("Sessions metadata")
+    logger.info("=" * 60)
+    logger.info(
+        f"Inventory sessions : {len(inventory)}"
     )
-
-    camera_b = sum(
-        1
-        for s in sessions.values()
-        if s["recording"]["cameras"]["camera_b"]["available"]
+    logger.info(
+        f"Added              : {added}"
     )
-
-    audio = sum(
-        1
-        for s in sessions.values()
-        if s["recording"]["audio"]["available"]
+    logger.info(
+        f"Updated            : {updated}"
     )
-
-    elan = sum(
-        1
-        for s in sessions.values()
-        if s["annotations"]["elan"]["available"]
+    logger.info(
+        f"Output sessions    : {len(sessions)}"
     )
-
-    reid = sum(
-        1
-        for s in sessions.values()
-        if s["existing_resources"]["reid_config"]
+    logger.info(
+        f"Output             : {output_path}"
     )
-
-    print()
-    print("=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-
-    print(f"Total sessions:       {total}")
-    print(f"Matched raw folders:  {matched}")
-    print(f"Unmatched folders:    {unmatched}")
-    print(f"Camera A:             {camera_a}")
-    print(f"Camera B:             {camera_b}")
-    print(f"Audio:                {audio}")
-    print(f"ELAN annotations:     {elan}")
-    print(f"ReID configs:         {reid}")
-
-    print()
-    print(
-        f"[ok] Saved metadata: {args.output}"
-    )
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
