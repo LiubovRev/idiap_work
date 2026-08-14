@@ -1,0 +1,15 @@
+1. Add a metadata generator pass:
+- Run create_sessions_metadata.py with actual filesystem traversal to populate:
+  - recording.cameras[].{files, fps, resolution, duration_s}
+  - recording.audio.{files, sample_rate_hz, duration_s}
+  - paths.raw.*
+  - participants.clinicians[] (infer from ELAN or folder naming)
+  - annotations.elan.files if .eaf or .txt exports exist
+
+2. Add validation on load:
+- Log warnings if recording.cameras.*.available == false but paths.raw.camera_* != []
+- Warn if annotations.elan.available == false but files are expected per your documentation
+
+3. Track at what point this was generated:
+- Is this output from create_sessions_metadata.py after a first scan, or hand-crafted?
+- Add a generation_method field to the top-level dataset dict
