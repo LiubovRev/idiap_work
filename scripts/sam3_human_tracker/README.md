@@ -32,15 +32,15 @@ python visualize_sam3_boxes.py
 
 Expected files:
 
-.
-├── video_processed_a.mp4
-├── sam3_body_detections.csv
-├── sam3_masks_to_body_csv.py
-├── visualize_sam3_boxes.py
-└── MaskDir/
-    ├── 0.mp4
-    ├── 1.mp4
-    └── 2.mp4
+.  
+├── video_processed_a.mp4  
+├── sam3_body_detections.csv  
+├── sam3_masks_to_body_csv.py  
+├── visualize_sam3_boxes.py  
+└── MaskDir/  
+    ├── 0.mp4  
+    ├── 1.mp4  
+    └── 2.mp4  
 
 Output:
 
