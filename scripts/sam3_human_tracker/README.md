@@ -46,18 +46,3 @@ Output:
 
 sam3_boxes_visualization.mp4
 
-The visualization displays:
-
-SAM3 bounding boxes
-SAM3 PID labels
-frame number
-Workflow
-SAM3 binary masks
-       ↓
-sam3_masks_to_body_csv.py
-       ↓
-sam3_body_detections.csv
-       ↓
-visualize_sam3_boxes.py
-       ↓
-sam3_boxes_visualization.mp4
