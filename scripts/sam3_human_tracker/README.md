@@ -22,7 +22,7 @@ frame_index,pid,body_bbox_xmin,body_bbox_ymin,body_bbox_xmax,body_bbox_ymax,...
 The pid corresponds to the SAM3 mask filename.
 
 ---
-visualize_sam3_boxes.py
+### `visualize_sam3_boxes.py`
 
 Draws the SAM3 body bounding boxes from the CSV onto the original video.
 
