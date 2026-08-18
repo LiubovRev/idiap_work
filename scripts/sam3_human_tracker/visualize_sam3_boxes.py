@@ -1,123 +1,149 @@
+# coding=utf-8
+
+import argparse
+
 import cv2
 import pandas as pd
-import os
 
-VIDEO = "video_processed_a.mp4"
-CSV = "sam3_body_detections.csv"
-OUTPUT = "sam3_boxes_visualization.mp4"
 
-# Read detections
-df = pd.read_csv(CSV)
-
-# Group detections by frame for fast lookup
-frames = {
-    int(frame_idx): group
-    for frame_idx, group in df.groupby("frame_index")
-}
-
-# Open video
-cap = cv2.VideoCapture(VIDEO)
-
-if not cap.isOpened():
-    raise RuntimeError(f"Could not open video: {VIDEO}")
-
-fps = cap.get(cv2.CAP_PROP_FPS)
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-print(f"Video: {VIDEO}")
-print(f"Resolution: {width} x {height}")
-print(f"FPS: {fps}")
-print(f"Frames: {num_frames}")
-
-# Output video
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-writer = cv2.VideoWriter(
-    OUTPUT,
-    fourcc,
-    fps,
-    (width, height),
-)
-
-# Different colors for different PIDs
-colors = [
-    (0, 255, 0),      # green
-    (255, 0, 0),      # blue
-    (0, 0, 255),      # red
-    (255, 255, 0),    # cyan
-    (255, 0, 255),    # magenta
-    (0, 255, 255),    # yellow
+COLORS = [
+    (0, 255, 0),
+    (255, 0, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
 ]
 
-frame_idx = 0
 
-while True:
-    ok, frame = cap.read()
+def main(args):
+    df = pd.read_csv(args.csv)
 
-    if not ok:
-        break
+    frames = {
+        int(frame_index): group
+        for frame_index, group in df.groupby("frame_index")
+    }
 
-    # Get detections for this frame
-    detections = frames.get(frame_idx)
+    cap = cv2.VideoCapture(args.video)
 
-    if detections is not None:
-        for _, row in detections.iterrows():
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {args.video}")
 
-            pid = int(row["pid"])
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            x1 = int(row["body_bbox_xmin"])
-            y1 = int(row["body_bbox_ymin"])
-            x2 = int(row["body_bbox_xmax"])
-            y2 = int(row["body_bbox_ymax"])
+    print(f"Video: {args.video}")
+    print(f"Resolution: {width} x {height}")
+    print(f"FPS: {fps}")
+    print(f"Frames: {num_frames}")
+    print(f"CSV: {args.csv}")
+    print(f"Output: {args.output}")
 
-            color = colors[pid % len(colors)]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
-            # Bounding box
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                color,
-                3,
-            )
-
-            # Label
-            label = f"SAM3 PID {pid}"
-
-            cv2.putText(
-                frame,
-                label,
-                (x1, max(30, y1 - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
-
-    # Frame number
-    cv2.putText(
-        frame,
-        f"Frame: {frame_idx}/{num_frames - 1}",
-        (20, 35),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
+    writer = cv2.VideoWriter(
+        args.output,
+        fourcc,
+        fps,
+        (width, height),
     )
 
-    writer.write(frame)
+    frame_index = 0
 
-    frame_idx += 1
+    if not writer.isOpened():
+        raise RuntimeError(
+        f"Could not create output video: {args.output}"
+    )    
+    while True:
+        ok, frame = cap.read()
 
-    if frame_idx % 500 == 0:
-        print(f"Processed {frame_idx}/{num_frames} frames")
+        if not ok:
+            break
 
-cap.release()
-writer.release()
+        detections = frames.get(frame_index)
 
-print()
-print(f"Done: {OUTPUT}")
-print(f"Size: {os.path.getsize(OUTPUT) / 1024 / 1024:.1f} MB")
+        if detections is not None:
+            for _, row in detections.iterrows():
+                pid = int(row["pid"])
+
+                x1 = int(row["body_bbox_xmin"])
+                y1 = int(row["body_bbox_ymin"])
+                x2 = int(row["body_bbox_xmax"])
+                y2 = int(row["body_bbox_ymax"])
+
+                color = COLORS[pid % len(COLORS)]
+
+                cv2.rectangle(
+                    frame,
+                    (x1, y1),
+                    (x2, y2),
+                    color,
+                    3,
+                )
+
+                label = f"SAM3 PID {pid}"
+
+                cv2.putText(
+                    frame,
+                    label,
+                    (x1, max(30, y1 - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+        cv2.putText(
+            frame,
+            f"Frame: {frame_index}/{num_frames - 1}",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        writer.write(frame)
+
+        frame_index += 1
+
+        if frame_index % 500 == 0:
+            print(f"Processed {frame_index}/{num_frames}")
+
+    cap.release()
+    writer.release()
+
+    print()
+    print(f"Done: {args.output}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Visualize SAM3 body bounding boxes on a video."
+    )
+
+    parser.add_argument(
+        "--video",
+        required=True,
+        help="Original video",
+    )
+
+    parser.add_argument(
+        "--csv",
+        required=True,
+        help="SAM3 body detection CSV",
+    )
+
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Output visualization video",
+    )
+
+    args = parser.parse_args()
+
+    main(args)

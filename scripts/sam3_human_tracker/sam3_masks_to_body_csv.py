@@ -1,168 +1,188 @@
+# coding=utf-8
+
 import argparse
-from pathlib import Path
+import os
 
 import cv2
-import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
+def mask_to_bbox(mask, min_area=500):
+    """Return bounding box of the largest sufficiently large mask component."""
 
-def mask_video_to_rows(mask_file: Path, pid: int):
-    cap = cv2.VideoCapture(str(mask_file))
+    binary = (mask > 0).astype("uint8")
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
+
+    valid_labels = [
+        i for i in range(1, num_labels)
+        if stats[i, cv2.CC_STAT_AREA] >= min_area
+    ]
+
+    if not valid_labels:
+        return None
+
+    # Usually the person is the largest component
+    label = max(
+        valid_labels,
+        key=lambda i: stats[i, cv2.CC_STAT_AREA]
+    )
+
+    x = stats[label, cv2.CC_STAT_LEFT]
+    y = stats[label, cv2.CC_STAT_TOP]
+    w = stats[label, cv2.CC_STAT_WIDTH]
+    h = stats[label, cv2.CC_STAT_HEIGHT]
+
+    return (
+        float(x),
+        float(y),
+        float(x + w - 1),
+        float(y + h - 1),
+    )
+
+def process_mask(mask_file, pid):
+    cap = cv2.VideoCapture(mask_file)
 
     if not cap.isOpened():
         raise RuntimeError(f"Could not open mask video: {mask_file}")
 
-    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
     rows = []
 
-    for frame_index in tqdm(
-        range(num_frames),
-        desc=f"PID {pid}",
-    ):
+    frame_index = 0
+
+    while True:
         ok, frame = cap.read()
 
         if not ok:
-            print(
-                f"Warning: could not read frame "
-                f"{frame_index} from {mask_file}"
+            break
+
+        # Convert to grayscale in case the mask video is RGB.
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        bbox = mask_to_bbox(gray)
+
+        if bbox is not None:
+            xmin, ymin, xmax, ymax = bbox
+
+            rows.append(
+                {
+                    "frame_index": frame_index,
+                    "pid": pid,
+                    "body_bbox_xmin": xmin,
+                    "body_bbox_ymin": ymin,
+                    "body_bbox_xmax": xmax,
+                    "body_bbox_ymax": ymax,
+                }
             )
-            continue
 
-        # Binary black/white mask.
-        # Convert to grayscale in case the mp4 has 3 channels.
-        if frame.ndim == 3:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = frame
+        frame_index += 1
 
-        # Any non-black pixel belongs to the mask.
-        ys, xs = np.where(gray > 0)
-
-        # Empty mask for this frame.
-        if len(xs) == 0:
-            continue
-
-        rows.append(
-            {
-                "frame_index": frame_index,
-                "pid": pid,
-                "body_bbox_xmin": float(xs.min()),
-                "body_bbox_ymin": float(ys.min()),
-                "body_bbox_xmax": float(xs.max()),
-                "body_bbox_ymax": float(ys.max()),
-                "video_file": str(mask_file),
-                "video_name": mask_file.name,
-                "num_frames": num_frames,
-                "frame_height": height,
-                "frame_width": width,
-                "fps": fps,
-            }
-        )
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    num_frames = frame_index
 
     cap.release()
 
-    return rows
+    return rows, fps, width, height, num_frames
 
 
-def main():
+def main(args):
+    mask_files = sorted(
+        [
+            f
+            for f in os.listdir(args.mask_dir)
+            if f.lower().endswith((".mp4", ".avi", ".mkv"))
+        ],
+        key=lambda x: int(os.path.splitext(x)[0])
+        if os.path.splitext(x)[0].isdigit()
+        else x,
+    )
+
+    if not mask_files:
+        raise RuntimeError(f"No mask videos found in {args.mask_dir}")
+
+    print(f"Mask directory: {args.mask_dir}")
+    print(f"Found {len(mask_files)} mask files")
+
+    all_rows = []
+
+    video_info = None
+
+    for mask_file in mask_files:
+        path = os.path.join(args.mask_dir, mask_file)
+
+        name = os.path.splitext(mask_file)[0]
+
+        try:
+            pid = int(name)
+        except ValueError:
+            print(f"Skipping non-numeric mask: {mask_file}")
+            continue
+
+        print(f"Processing PID {pid}: {mask_file}")
+
+        rows, fps, width, height, num_frames = process_mask(path, pid)
+
+        for row in rows:
+            row["video_file"] = path
+            row["video_name"] = mask_file
+            row["num_frames"] = num_frames
+            row["frame_height"] = height
+            row["frame_width"] = width
+            row["fps"] = fps
+
+        all_rows.extend(rows)
+
+        if video_info is None:
+            video_info = (fps, width, height, num_frames)
+
+    df = pd.DataFrame(all_rows)
+
+    columns = [
+        "frame_index",
+        "pid",
+        "body_bbox_xmin",
+        "body_bbox_ymin",
+        "body_bbox_xmax",
+        "body_bbox_ymax",
+        "video_file",
+        "video_name",
+        "num_frames",
+        "frame_height",
+        "frame_width",
+        "fps",
+    ]
+
+    df = df[columns]
+
+    df.to_csv(args.output, index=False, float_format="%.2f")
+
+    print()
+    print(f"Saved: {args.output}")
+    print(f"Rows: {len(df)}")
+    print(f"PIDs: {sorted(df.pid.unique())}")
+
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Convert SAM3 binary mask videos to body bounding boxes."
+        description="Convert SAM3 binary mask videos to body bounding-box CSV."
     )
 
     parser.add_argument(
         "--mask_dir",
         required=True,
-        help="Directory containing SAM3 mask videos, e.g. MaskDir/",
+        help="Directory containing SAM3 mask videos (e.g. 0.mp4, 1.mp4, ...)",
     )
 
     parser.add_argument(
         "--output",
         required=True,
-        help="Output CSV file.",
+        help="Output CSV file",
     )
 
     args = parser.parse_args()
 
-    mask_dir = Path(args.mask_dir)
-    output_file = Path(args.output)
-
-    if not mask_dir.exists():
-        raise FileNotFoundError(f"Mask directory not found: {mask_dir}")
-
-    # SAM3 mask files are named with their PID:
-    # 0.mp4, 1.mp4, 2.mp4, ...
-    mask_files = sorted(
-        [
-            f
-            for f in mask_dir.glob("*.mp4")
-            if f.stem.isdigit()
-        ],
-        key=lambda f: int(f.stem),
-    )
-
-    if not mask_files:
-        raise RuntimeError(
-            f"No PID mask videos found in {mask_dir}"
-        )
-
-    print(f"Mask directory: {mask_dir}")
-    print(f"Found {len(mask_files)} SAM3 mask videos:")
-    for f in mask_files:
-        print(f"  PID {f.stem}: {f}")
-
-    all_rows = []
-
-    for mask_file in mask_files:
-        pid = int(mask_file.stem)
-
-        rows = mask_video_to_rows(
-            mask_file=mask_file,
-            pid=pid,
-        )
-
-        all_rows.extend(rows)
-
-    if not all_rows:
-        raise RuntimeError("No non-empty masks found.")
-
-    df = pd.DataFrame(all_rows)
-
-    # Sort by frame and PID.
-    df = df.sort_values(
-        ["frame_index", "pid"]
-    ).reset_index(drop=True)
-
-    output_file.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    df.to_csv(
-        output_file,
-        index=False,
-        float_format="%.2f",
-    )
-
-    print()
-    print("Done.")
-    print(f"Output: {output_file}")
-    print(f"Rows: {len(df)}")
-    print(f"Frames: {df['frame_index'].nunique()}")
-    print(f"PIDs: {df['pid'].nunique()}")
-    print()
-    print("Rows per PID:")
-    print(df["pid"].value_counts().sort_index())
-    print()
-    print("Columns:")
-    print(df.columns.tolist())
-    print()
-    print(df.head(10))
-
-
-if __name__ == "__main__":
-    main()
+    main(args)
