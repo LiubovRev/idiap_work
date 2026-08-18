@@ -1,6 +1,6 @@
-# SAM3 Mask Visualization
+# SAM3 Human Tracker
 
-Utilities for converting SAM3 binary mask tracks into body bounding-box CSV data and visualizing the boxes on the original video.
+
 
 
 ## Scripts
