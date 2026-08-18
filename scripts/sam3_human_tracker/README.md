@@ -2,6 +2,7 @@
 
 Utilities for converting SAM3 binary mask tracks into body bounding-box CSV data and visualizing the boxes on the original video.
 
+
 ## Scripts
 
 `sam3_masks_to_body_csv.py` - Extracts body bounding boxes from SAM3 binary masks and preserves SAM3 mask IDs as pid.  
@@ -19,6 +20,8 @@ Utilities for converting SAM3 binary mask tracks into body bounding-box CSV data
 `visualize_sam3_head_body.py` - Visualizes combined SAM3 body boxes, PIDs, and matched head detections.  
 
 `visualize_sam3_head_body.sh` - Bash wrapper for SAM3 head/body visualization.  
+
+---
 
 ### `sam3_masks_to_body_csv.py`
 
@@ -45,7 +48,7 @@ Draws the SAM3 body bounding boxes from the CSV onto the original video.
 ```bash
 python visualize_sam3_boxes.py
 ```
-
+---
 Expected files:
 
 .  
