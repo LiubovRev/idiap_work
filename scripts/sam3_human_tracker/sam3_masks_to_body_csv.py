@@ -6,10 +6,18 @@ import os
 import cv2
 import pandas as pd
 
-def mask_to_bbox(mask, min_area=500):
-    """Return bounding box of the largest sufficiently large mask component."""
+
+def mask_to_bbox(mask, min_area=1000, border_margin=5):
+    """Return bounding box of the largest sufficiently large mask component, filtering border noise."""
 
     binary = (mask > 0).astype("uint8")
+
+    # 1. Zero out frame borders to eliminate SAM3 edge artifacts
+    if border_margin > 0:
+        binary[:border_margin, :] = 0
+        binary[-border_margin:, :] = 0
+        binary[:, :border_margin] = 0
+        binary[:, -border_margin:] = 0
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
         binary,
@@ -42,7 +50,8 @@ def mask_to_bbox(mask, min_area=500):
         float(y + h - 1),
     )
 
-def process_mask(mask_file, pid):
+
+def process_mask(mask_file, pid, min_area=1000, border_margin=5):
     cap = cv2.VideoCapture(mask_file)
 
     if not cap.isOpened():
@@ -61,7 +70,7 @@ def process_mask(mask_file, pid):
         # Convert to grayscale in case the mask video is RGB.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        bbox = mask_to_bbox(gray)
+        bbox = mask_to_bbox(gray, min_area=min_area, border_margin=border_margin)
 
         if bbox is not None:
             xmin, ymin, xmax, ymax = bbox
@@ -124,7 +133,12 @@ def main(args):
 
         print(f"Processing PID {pid}: {mask_file}")
 
-        rows, fps, width, height, num_frames = process_mask(path, pid)
+        rows, fps, width, height, num_frames = process_mask(
+            path,
+            pid,
+            min_area=args.min_area,
+            border_margin=args.border_margin,
+        )
 
         for row in rows:
             row["video_file"] = path
@@ -181,6 +195,20 @@ if __name__ == "__main__":
         "--output",
         required=True,
         help="Output CSV file",
+    )
+
+    parser.add_argument(
+        "--min_area",
+        type=int,
+        default=1000,
+        help="Minimum area (in pixels) for valid component (default: 1000)",
+    )
+
+    parser.add_argument(
+        "--border_margin",
+        type=int,
+        default=5,
+        help="Margin (in pixels) to zero out along image borders to remove edge noise (default: 5)",
     )
 
     args = parser.parse_args()
