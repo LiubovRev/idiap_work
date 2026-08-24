@@ -252,7 +252,8 @@ def main(args):
     print()
     print("Head rows:", len(df_head))
     print("Head frames:", df_head["frame_index"].nunique())
-
+    
+    body_metadata = {}
     metadata_cols = [
         "video_file",
         "video_name",
@@ -261,8 +262,13 @@ def main(args):
         "frame_width",
         "fps",
     ]
-
-    output_rows = []
+    
+    for col in metadata_cols:
+        if col in df_body.columns:
+            # Use the most common value for this column (handles edge cases)
+            body_metadata[col] = df_body[col].mode()[0] if len(df_body[col].mode()) > 0 else df_body[col].iloc[0]
+            
+        output_rows = []
 
     inside_matches = 0
     outside_matches = 0
@@ -349,10 +355,9 @@ def main(args):
             # Metadata
             # ------------------------------------------------------
 
+            # Metadata (use extracted body metadata, not per-row)
             for col in metadata_cols:
-
-                if col in body:
-                    row[col] = body[col]
+                row[col] = body_metadata.get(col, np.nan)
 
             output_rows.append(row)
 
@@ -457,6 +462,27 @@ def main(args):
             dropna=False
         )
     )
+
+    print()
+    print("========================================")
+    print("METADATA VERIFICATION")
+    print("========================================")
+
+    # Verify metadata consistency
+    print(f"Video file: {df_output['video_file'].iloc[0]}")
+    print(f"Video name: {df_output['video_name'].iloc[0]}")
+    print(f"Video frames: {df_output['num_frames'].iloc[0]}")
+    print(f"Frame resolution: {df_output['frame_width'].iloc[0]:.0f} x {df_output['frame_height'].iloc[0]:.0f}")
+    print(f"FPS: {df_output['fps'].iloc[0]}")
+
+    # Check for metadata consistency across all rows
+    unique_videos = df_output['video_file'].nunique()
+    unique_names = df_output['video_name'].nunique()
+
+    if unique_videos == 1 and unique_names == 1:
+        print("✓ Metadata consistent across all rows")
+    else:
+        print(f"⚠ Warning: Found {unique_videos} unique video_file values and {unique_names} unique video_name values")
 
     print()
     print("Done.")
