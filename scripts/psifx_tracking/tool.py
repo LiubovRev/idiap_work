@@ -20,7 +20,7 @@ from psifx.video.tracking.tool import TrackingTool
 
 class Sam3TrackingMetadata:
     """Metadata tracking for SAM3 inference pipeline."""
-    
+
     def __init__(self, output_dir: Path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -35,8 +35,8 @@ class Sam3TrackingMetadata:
             "output_files": {},
         }
         self.save()
-    
-    def update_video_info(self, video_path: str, fps: float, num_frames: int, 
+
+    def update_video_info(self, video_path: str, fps: float, num_frames: int,
                          width: int, height: int):
         """Update video metadata."""
         self.data["video_info"] = {
@@ -48,12 +48,12 @@ class Sam3TrackingMetadata:
             "file_size_mb": Path(video_path).stat().st_size / (1024**2) if Path(video_path).exists() else None,
         }
         self.save()
-    
+
     def update_config(self, **kwargs):
         """Update processing configuration."""
         self.data["processing_config"].update(kwargs)
         self.save()
-    
+
     def start_step(self, step_name: str):
         """Mark step start."""
         self.data["pipeline_steps"][step_name] = {
@@ -61,7 +61,7 @@ class Sam3TrackingMetadata:
             "start_time": datetime.now().isoformat(),
         }
         self.save()
-    
+
     def end_step(self, step_name: str, success: bool = True, **kwargs):
         """Mark step end."""
         if step_name in self.data["pipeline_steps"]:
@@ -69,7 +69,7 @@ class Sam3TrackingMetadata:
             self.data["pipeline_steps"][step_name]["end_time"] = datetime.now().isoformat()
             self.data["pipeline_steps"][step_name].update(kwargs)
         self.save()
-    
+
     def add_output_file(self, file_type: str, path: str, size_mb: float = None):
         """Track output file."""
         self.data["output_files"][file_type] = {
@@ -77,17 +77,17 @@ class Sam3TrackingMetadata:
             "size_mb": size_mb,
         }
         self.save()
-    
+
     def finalize(self):
         """Finalize metadata."""
         self.data["timestamp_end"] = datetime.now().isoformat()
         self.save()
-    
+
     def save(self):
         """Save metadata to file."""
         with open(self.metadata_file, "w") as f:
             json.dump(self.data, f, indent=2)
-    
+
     def get_summary(self) -> dict:
         """Get metadata summary."""
         return self.data
@@ -165,7 +165,7 @@ class Sam3TrackingTool(TrackingTool):
                 raise FileExistsError(f"Mask directory {mask_dir} is non-empty.")
 
         mask_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Initialize metadata tracker
         self.metadata = Sam3TrackingMetadata(mask_dir)
 
@@ -179,7 +179,7 @@ class Sam3TrackingTool(TrackingTool):
 
             num_frames = len(video_reader)
             _, height, width, _ = video_reader.getShape()
-        
+
         # Update metadata with video info
         self.metadata.update_video_info(
             video_path=str(video_path),
@@ -267,7 +267,7 @@ class Sam3TrackingTool(TrackingTool):
             raise ValueError(f"No frames found in input video: {video_path}")
         if not writers:
             print("No masks to write.")
-        
+
         # Track output files
         mask_files = list(mask_dir.glob("*.mp4"))
         total_mask_size = sum(f.stat().st_size for f in mask_files) / (1024**2) if mask_files else 0
@@ -278,7 +278,7 @@ class Sam3TrackingTool(TrackingTool):
             frames_processed=processed_frame_count,
         )
         self.metadata.finalize()
-        
+
         if self.verbose:
             print(f"\n✓ Metadata saved: {self.metadata.metadata_file}")
 
@@ -491,7 +491,7 @@ class Sam3TrackingTool(TrackingTool):
                     continue
                 writers[global_obj_id] = VideoWriter(
                     path=mask_dir / f"{global_obj_id}.mp4",
-                    input_dict={"-r": frame_rate},
+                    input_dict={"-r": str(frame_rate)},
                     output_dict={"-c:v": "libx264", "-crf": "0", "-pix_fmt": "yuv420p"},
                     overwrite=self.overwrite,
                 )
