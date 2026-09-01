@@ -8,11 +8,12 @@ ELAN format (tab-separated):
 Example:
     c14_CP		00:02:47.571	167.571	00:18:38.787	1118.787	00:15:51.216	951.216	CST
 
-Output CSV: one row per annotation with frame indices computed from timestamps.
+Output CSV: one row per frame within annotation interval.
+Accounts for video trimming using SAM3 metadata.
 """
 
 import argparse
-import csv
+import json
 import os
 import re
 
@@ -36,7 +37,7 @@ def parse_elan_txt(txt_file):
             
             # Split by tab and filter empty fields
             parts = [p.strip() for p in line.split('\t')]
-            parts = [p for p in parts if p]  # Remove empty strings
+            parts = [p for p in parts if p]  
             
             if len(parts) < 8:
                 print(f"Warning: skipping line with {len(parts)} fields: {line[:80]}")
@@ -44,9 +45,9 @@ def parse_elan_txt(txt_file):
             
             try:
                 tier_id = parts[0]
-                begin_time_sec = float(parts[2])  # numeric seconds
-                end_time_sec = float(parts[4])    # numeric seconds
-                duration_sec = float(parts[6])    # numeric seconds
+                begin_time_sec = float(parts[2])  
+                end_time_sec = float(parts[4])    
+                duration_sec = float(parts[6])    
                 value = parts[7]
                 
                 rows.append({
@@ -63,87 +64,55 @@ def parse_elan_txt(txt_file):
     return rows
 
 
-def extract_individual_and_session_from_path(txt_file):
-    """
-    Extract individual ID and session ID from filename.
-    
-    Assumes filename format: something_individual_X_session_Y.txt
-    or just use parent directory structure if available.
-    
-    Returns (individual_id, session_id) or (None, None) if not found.
-    """
-    basename = os.path.basename(txt_file)
-    
-    # Try pattern: Individual_X_session_Y or similar
-    match = re.search(r'[Ii]ndividual.?(\d+).*[Ss]ession.?(\d+)', basename)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    
-    # Try pattern: just numbers
-    match = re.search(r'(\d+)_(\d+)', basename)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    
-    return None, None
-
-
 def extract_individual_from_tier(tier_id):
     """
-    Extract participant indicator from tier ID.
+    Extract participant ID from tier ID.
     
     Examples:
-        c14_CP -> participant 14 (child)
-        t1_TP -> participant 1 (therapist)
-        cX_* -> child X
-        tX_* -> therapist X
+        c14_CP -> pid 14 (child)
+        t1_TP -> pid 1 (therapist) 
+        cX_* -> child, use pid X
+        tX_* -> therapist, use pid 0
     
-    Returns participant index (int) or None
+    Returns participant ID (int) or None
     """
-    match = re.match(r'[ct](\d+)', tier_id)
+    match = re.match(r'([ct])(\d+)', tier_id)
     if match:
-        return int(match.group(1))
+        role = match.group(1)
+        num = int(match.group(2))
+        
+        # c = child, t = therapist (use 0 for therapist)
+        if role == 'c':
+            return num 
+        elif role == 't':
+            return 0    
     return None
 
 
-def categorize_behavior(tier_id, value):
+def load_sam3_metadata(metadata_json):
     """
-    Map ELAN tier and value to behavior category.
+    Load SAM3 metadata to get video trimming info.
     
-    Tiers (Type 1 - individual sessions):
-        cX_CP, tX_TP -> position
-        cX_CA, cX_CAO, cX_CAT -> attention
-        cX_CG -> gaze
-        cX_CI, tX_TI -> interaction
-        cX_CV, tX_TV -> voice
-        cX_CSP, tX_TSP -> session_pattern
-        cX_CTCA -> common_action
-        cX_JA -> joint_eye_contact
+    Returns (fps, trim_start_sec) where trim_start_sec is the offset in the original video.
     """
-    tier_parts = tier_id.lower().split('_')
+    if not metadata_json or not os.path.exists(metadata_json):
+        return None, 0.0
     
-    if len(tier_parts) < 2:
-        return 'other'
-    
-    tier_type = tier_parts[1]
-    
-    if tier_type in ('cp', 'tp'):
-        return 'position'
-    elif tier_type in ('ca', 'cao', 'cat'):
-        return 'attention'
-    elif tier_type == 'cg':
-        return 'gaze'
-    elif tier_type in ('ci', 'ti'):
-        return 'interaction'
-    elif tier_type in ('cv', 'tv'):
-        return 'voice'
-    elif tier_type in ('csp', 'tsp'):
-        return 'session_pattern'
-    elif tier_type == 'ctca':
-        return 'common_action'
-    elif tier_type == 'ja':
-        return 'joint_eye_contact'
-    else:
-        return 'other'
+    try:
+        with open(metadata_json, 'r') as f:
+            meta = json.load(f)
+        
+        fps = meta.get('input_video', {}).get('fps')
+        trim_start_s = meta.get('time_window', {}).get('start_s', 0.0)
+        
+        print(f"Loaded SAM3 metadata:")
+        print(f"  FPS: {fps}")
+        print(f"  Trim start: {trim_start_s}s")
+        
+        return fps, trim_start_s
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"Warning: Could not load SAM3 metadata: {e}")
+        return None, 0.0
 
 
 def get_video_fps(video_path):
@@ -166,6 +135,8 @@ def time_to_frame(time_sec, fps):
 def main(args):
     print(f"ELAN annotation file: {args.elan_txt}")
     print(f"Video file: {args.video}")
+    if args.sam3_metadata:
+        print(f"SAM3 metadata: {args.sam3_metadata}")
     print(f"Individual ID: {args.individual_id}")
     print(f"Session ID: {args.session_id}")
     print(f"Output CSV: {args.output}")
@@ -179,52 +150,80 @@ def main(args):
         print("ERROR: No annotations parsed. Check file format.")
         return
 
-    # Get video FPS
-    fps = get_video_fps(args.video)
-    print(f"Video FPS: {fps}")
+    # Get video FPS (metadata if available)
+    fps_meta, trim_start_s = load_sam3_metadata(args.sam3_metadata)
+    if fps_meta:
+        fps = fps_meta
+        print(f"Video FPS from SAM3 metadata: {fps}")
+    else:
+        fps = get_video_fps(args.video)
+        print(f"Video FPS from video file: {fps}")
+        trim_start_s = 0.0
+    
+    # Override with explicit trim_start if provided
+    if args.trim_start_seconds is not None:
+        trim_start_s = args.trim_start_seconds
+        print(f"Using explicit trim start: {trim_start_s}s")
+    
     print()
 
-    # Convert to CSV rows
+    # Compute trim start frame
+    trim_start_frame = int(trim_start_s * fps)
+    print(f"Trim start: {trim_start_s}s = frame {trim_start_frame}")
+    print()
+
+    # Convert to CSV rows (one row per frame)
     csv_rows = []
     for ann in annotations:
         begin_frame = time_to_frame(ann['begin_time_sec'], fps)
         end_frame = time_to_frame(ann['end_time_sec'], fps)
         
-        category = categorize_behavior(ann['tier_id'], ann['value'])
+        # Skip annotations outside trimming window
+        if end_frame < trim_start_frame:
+            continue  # Annotation ends before trim starts
+        if begin_frame >= trim_start_frame + int((300 * fps)):  # Rough check
+            continue  # Annotation starts after trim ends (adjust as needed)
         
-        # Determine participant info
-        participant_id = extract_individual_from_tier(ann['tier_id'])
-        if participant_id is None:
-            participant_id = args.individual_id
+        # Adjust frame indices to trimmed video (subtract trim start)
+        begin_frame_trimmed = max(0, begin_frame - trim_start_frame)
+        end_frame_trimmed = max(0, end_frame - trim_start_frame)
         
-        csv_rows.append({
-            'frame_index_start': begin_frame,
-            'frame_index_end': end_frame,
-            'timestamp_start_sec': ann['begin_time_sec'],
-            'timestamp_end_sec': ann['end_time_sec'],
-            'tier_id': ann['tier_id'],
-            'behavior_code': ann['value'],
-            'behavior_category': category,
-            'duration_sec': ann['duration_sec'],
-            'individual_id': args.individual_id,
-            'session_id': args.session_id,
-            'participant_in_tier': participant_id,
-        })
+        # Determine participant ID from behavior code prefix
+        behavior_code = ann['value']
+        if behavior_code.startswith('T'):
+            participant_id = 0  # Therapist
+        elif behavior_code.startswith('C'):
+            participant_id = args.individual_id  # Child
+        else:
+            participant_id = args.individual_id  # Default to child ID
+        
+        # One row per frame in the annotation interval
+        for frame_idx in range(begin_frame_trimmed, end_frame_trimmed + 1):
+            # Original frame index and time in full video
+            frame_original = frame_idx + trim_start_frame
+            time_original = frame_original / fps
+            
+            # Trimmed time
+            time_trimmed = frame_idx / fps
+            
+            csv_rows.append({
+                'frame_index': frame_idx,
+                'frame_index_original': frame_original,
+                'time_sec': time_trimmed,
+                'time_sec_original': time_original,
+                'pid': participant_id,
+                'behavior_code': ann['value'],
+            })
 
     df = pd.DataFrame(csv_rows)
 
     columns = [
-        'frame_index_start',
-        'frame_index_end',
-        'timestamp_start_sec',
-        'timestamp_end_sec',
-        'tier_id',
+        'frame_index',
+        'frame_index_original',
+        'time_sec',
+        'time_sec_original',
+        'pid',
         'behavior_code',
-        'behavior_category',
-        'duration_sec',
-        'individual_id',
-        'session_id',
-        'participant_in_tier',
     ]
     df = df[columns]
 
@@ -234,16 +233,16 @@ def main(args):
     df.to_csv(args.output, index=False)
     print(f"Saved: {args.output}")
     print(f"Rows: {len(df)}")
-    print(f"Frame range: {df['frame_index_start'].min()} — {df['frame_index_end'].max()}")
-    print(f"Behavior categories: {sorted(df['behavior_category'].unique())}")
-    print(f"Tiers: {sorted(df['tier_id'].unique())}")
+    print(f"Frame range: {df['frame_index'].min()} — {df['frame_index'].max()}")
+    print(f"Unique PIDs: {sorted(df['pid'].unique())}")
+    print(f"Behavior codes: {sorted(df['behavior_code'].unique())}")
     print()
-    print("✓ Conversion complete.")
+    print("Conversion complete.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Convert ELAN .txt annotations to frame-level CSV."
+        description="Convert ELAN .txt annotations to frame-level ground truth CSV."
     )
     parser.add_argument(
         "--elan_txt",
@@ -254,6 +253,17 @@ if __name__ == "__main__":
         "--video",
         required=True,
         help="Video file (to extract FPS)",
+    )
+    parser.add_argument(
+        "--sam3_metadata",
+        default=None,
+        help="SAM3 metadata JSON (to get FPS and trimming info)",
+    )
+    parser.add_argument(
+        "--trim_start_seconds",
+        type=float,
+        default=None,
+        help="Trim start time in seconds (overrides metadata)",
     )
     parser.add_argument(
         "--individual_id",
