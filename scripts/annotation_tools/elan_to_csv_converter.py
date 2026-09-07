@@ -37,7 +37,7 @@ def parse_elan_txt(txt_file):
             
             # Split by tab and filter empty fields
             parts = [p.strip() for p in line.split('\t')]
-            parts = [p for p in parts if p]  
+            parts = [p for p in parts if p]  # Remove empty strings
             
             if len(parts) < 8:
                 print(f"Warning: skipping line with {len(parts)} fields: {line[:80]}")
@@ -45,9 +45,9 @@ def parse_elan_txt(txt_file):
             
             try:
                 tier_id = parts[0]
-                begin_time_sec = float(parts[2])  
-                end_time_sec = float(parts[4])    
-                duration_sec = float(parts[6])    
+                begin_time_sec = float(parts[2])  # numeric seconds
+                end_time_sec = float(parts[4])    # numeric seconds
+                duration_sec = float(parts[6])    # numeric seconds
                 value = parts[7]
                 
                 rows.append({
@@ -83,9 +83,9 @@ def extract_individual_from_tier(tier_id):
         
         # c = child, t = therapist (use 0 for therapist)
         if role == 'c':
-            return num 
+            return num  # Child ID
         elif role == 't':
-            return 0    
+            return 0    # Therapist
     return None
 
 
@@ -150,7 +150,7 @@ def main(args):
         print("ERROR: No annotations parsed. Check file format.")
         return
 
-    # Get video FPS (metadata if available)
+    # Get video FPS (prefer SAM3 metadata if available)
     fps_meta, trim_start_s = load_sam3_metadata(args.sam3_metadata)
     if fps_meta:
         fps = fps_meta
